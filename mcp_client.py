@@ -72,9 +72,22 @@ def _component_name(tool_name, _server_info):
 
 def _server_params(config):
     timeout = _timeout_seconds()
+    if config.transport not in {"streamable-http", "sse"}:
+        raise ValueError(f"Unsupported MCP transport: {config.transport}")
+    if not config.url:
+        raise ValueError(f"MCP server {config.name!r} has no URL.")
+
+    # Re-validate at connect time (not just at registration time) so a
+    # connector whose DNS record changes after being saved (DNS rebinding)
+    # can't be used to reach a private/local address later.
+    from connectors import validate_connector_url
+
+    try:
+        validate_connector_url(config.url, resolve_dns=True)
+    except ValueError as exc:
+        raise ValueError(f"MCP server {config.name!r} blocked at connect time: {exc}") from exc
+
     if config.transport == "streamable-http":
-        if not config.url:
-            raise ValueError(f"MCP server {config.name!r} has no URL.")
         return StreamableHttpParameters(
             url=config.url,
             headers=config.headers or {},
@@ -82,16 +95,12 @@ def _server_params(config):
             sse_read_timeout=max(timeout, 300.0),
             terminate_on_close=True,
         )
-    if config.transport == "sse":
-        if not config.url:
-            raise ValueError(f"MCP server {config.name!r} has no URL.")
-        return SseServerParameters(
-            url=config.url,
-            headers=config.headers or {},
-            timeout=timeout,
-            sse_read_timeout=max(timeout, 300.0),
-        )
-    raise ValueError(f"Unsupported MCP transport: {config.transport}")
+    return SseServerParameters(
+        url=config.url,
+        headers=config.headers or {},
+        timeout=timeout,
+        sse_read_timeout=max(timeout, 300.0),
+    )
 
 
 def _schemas_from_group(group, configs_by_name):

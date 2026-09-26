@@ -1,6 +1,8 @@
 """Persistent MCP connector registry for the single-user Personal AI Assistant."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -78,7 +80,61 @@ def _decode_status(value):
     return decoded if isinstance(decoded, dict) else {}
 
 
+# --- Header encryption at rest -------------------------------------------------
+# If MCP_HEADER_ENCRYPTION_KEY is set, connector headers (which can contain
+# bearer tokens / API keys) are encrypted before being written to the
+# database. Without the key, headers fall back to plaintext storage so
+# existing local/dev setups keep working without breaking.
+_FERNET = None
+
+
+def _get_fernet():
+    global _FERNET
+    if _FERNET is not None:
+        return _FERNET
+    key = os.getenv("MCP_HEADER_ENCRYPTION_KEY", "").strip()
+    if not key:
+        return None
+    from cryptography.fernet import Fernet
+
+    try:
+        _FERNET = Fernet(key)
+    except Exception:
+        _FERNET = Fernet(base64.urlsafe_b64encode(hashlib.sha256(key.encode()).digest()))
+    return _FERNET
+
+
+def _encrypt_headers(header_map: dict) -> str:
+    payload = json.dumps(header_map)
+    fernet = _get_fernet()
+    if fernet is None:
+        return payload
+    return "enc:" + fernet.encrypt(payload.encode()).decode()
+
+
+def _decrypt_headers(raw) -> dict:
+    if not raw:
+        return {}
+    if isinstance(raw, str) and raw.startswith("enc:"):
+        fernet = _get_fernet()
+        if fernet is None:
+            return {}
+        try:
+            raw = fernet.decrypt(raw[4:].encode()).decode()
+        except Exception:
+            return {}
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+_LEGACY_MIGRATED = False
+
+
 def init_connectors_db():
+    global _LEGACY_MIGRATED
     ensure_directories()
     with connect() as con:
         con.execute(
@@ -97,18 +153,15 @@ def init_connectors_db():
         )
         con.execute("ALTER TABLE mcp_connectors ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT '{}'")
         con.execute("ALTER TABLE mcp_connectors ADD COLUMN IF NOT EXISTS last_checked_at TIMESTAMP NULL")
-
-
-def _migrate_legacy_schema():
-    """Remove legacy user-scoping from an existing PostgreSQL database."""
-    with connect() as con:
-        con.execute("DROP INDEX IF EXISTS mcp_connectors_user_id_name_key")
-        con.execute("ALTER TABLE mcp_connectors DROP COLUMN IF EXISTS user_id")
+    if not _LEGACY_MIGRATED:
+        with connect() as con:
+            con.execute("DROP INDEX IF EXISTS mcp_connectors_user_id_name_key")
+            con.execute("ALTER TABLE mcp_connectors DROP COLUMN IF EXISTS user_id")
+        _LEGACY_MIGRATED = True
 
 
 def list_connectors(*, redact_headers=False):
     init_connectors_db()
-    _migrate_legacy_schema()
     with connect() as con:
         rows = con.execute(
             """SELECT id,name,transport,url,headers,allowed_tools,enabled,status,last_checked_at,created_at
@@ -121,12 +174,7 @@ def list_connectors(*, redact_headers=False):
             tools = json.loads(allowed_tools)
         except (json.JSONDecodeError, TypeError):
             tools = []
-        try:
-            header_map = json.loads(headers)
-        except (json.JSONDecodeError, TypeError):
-            header_map = {}
-        if not isinstance(header_map, dict):
-            header_map = {}
+        header_map = _decrypt_headers(headers)
         result.append(
             {
                 "id": connector_id,
@@ -186,7 +234,6 @@ def upsert_connector(name, transport, url, allowed_tools=None, headers=None):
         raise ValueError("Too many MCP headers.")
 
     init_connectors_db()
-    _migrate_legacy_schema()
     with connect() as con:
         con.execute(
             """INSERT INTO mcp_connectors(name,transport,url,headers,allowed_tools,enabled,status,last_checked_at)
@@ -199,14 +246,13 @@ def upsert_connector(name, transport, url, allowed_tools=None, headers=None):
                    enabled=TRUE,
                    status='{}',
                    last_checked_at=NULL""",
-            (name, transport, url, json.dumps(header_map), json.dumps(tools)),
+            (name, transport, url, _encrypt_headers(header_map), json.dumps(tools)),
         )
     return get_connector(next(x["id"] for x in list_connectors() if x["name"] == name))
 
 
 def delete_connector(connector_id):
     init_connectors_db()
-    _migrate_legacy_schema()
     with connect() as con:
         cur = con.execute("DELETE FROM mcp_connectors WHERE id=?", (connector_id,))
     return cur.rowcount > 0
