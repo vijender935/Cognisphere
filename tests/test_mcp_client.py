@@ -47,3 +47,10 @@ def test_connector_status_persists(monkeypatch):
  finally:
   rows=[x for x in connectors.list_connectors() if x["name"]==name]
   if rows: connectors.delete_connector(rows[0]["id"])
+
+def test_component_name_alias_keeps_tools_for_connector_names_with_spaces():
+ from types import SimpleNamespace
+ config=SimpleNamespace(name="Search Image")
+ indexed=mcp_client._configs_by_component_name([config])
+ assert indexed["Search Image"] is config
+ assert indexed["Search_Image"] is config
