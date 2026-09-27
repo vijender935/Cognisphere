@@ -5,7 +5,7 @@ from groq import Groq
 from config import MAX_HISTORY_MESSAGES, MAX_ITERATIONS, MAX_RETRIES, MODEL, VISION_MODEL
 from orchestration import (
     ExecutionState, build_execution_plan, plan_prompt, plan_task,
-    recovery_instruction, select_mcp_tools, should_continue_execution,
+    recovery_instruction, select_relevant_tools, should_continue_execution,
     validate_tool_result,
 )
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS, init_db, load_history, semantic_recall_memories, remember_fact, save_turn
@@ -116,38 +116,52 @@ def build_messages(goal, session_id, rag_sources=None, memory_enabled=True):
     return messages
 
 def _tool_schemas_for(goal, web_search_enabled=True):
-    """Return only tools appropriate for the classified request.
+    """Build a small tool catalog using live MCP metadata.
 
-    Simple conversational messages intentionally receive no tool schemas. This
-    prevents the model from inventing tool calls for greetings/chitchat and
-    avoids entering the tool loop when no external action is needed.
+    MCP discovery is independent of static intent keywords. Every non-empty
+    request is compared against the currently advertised MCP tools, so adding
+    or removing a server/tool does not require code changes.
     """
-    plan = plan_task(goal)
-    if plan.complexity == "simple":
+    goal = goal.strip()
+    if not goal:
         return []
 
-    schemas = []
+    plan = plan_task(goal)
+    candidates = []
+
     if plan.needs_web and web_search_enabled:
-        schemas.extend(
+        candidates.extend(
             schema for schema in TOOL_SCHEMAS
             if schema.get("function", {}).get("name") == "web_search"
         )
-    if plan.needs_local_tools:
-        local_names = {"calculator", "read_file", "write_file", "run_shell"}
-        schemas.extend(
-            schema for schema in TOOL_SCHEMAS
-            if schema.get("function", {}).get("name") in local_names
-        )
 
-    if plan.needs_mcp:
-        try:
-            from mcp_client import discover_tool_schemas
-            schemas.extend(select_mcp_tools(discover_tool_schemas(), goal, max_tools=8))
-        except Exception as exc:
-            logger.warning("MCP discovery unavailable: %s", exc)
+    local_candidates = []
+    if plan.needs_local_tools:
+        local_candidates = [
+            schema for schema in TOOL_SCHEMAS
+            if schema.get("function", {}).get("name")
+            in {"calculator", "read_file", "write_file", "run_shell"}
+        ]
+
+    mcp_candidates = []
+    try:
+        from mcp_client import discover_tool_schemas
+        mcp_candidates = discover_tool_schemas()
+    except Exception as exc:
+        logger.warning("MCP discovery unavailable: %s", exc)
+
+    # Route both local and MCP candidates through the same metadata-driven
+    # selector. This prevents a generic local tool from winning simply because
+    # a static keyword happened to match the request.
+    routed_candidates = select_relevant_tools(
+        local_candidates + mcp_candidates,
+        goal,
+        max_tools=8,
+    )
+    candidates.extend(routed_candidates)
 
     unique = {}
-    for schema in schemas:
+    for schema in candidates:
         name = schema.get("function", {}).get("name")
         if name:
             unique[name] = schema
