@@ -229,9 +229,19 @@ async def _run_flow(flow_id,flow,redirect_uri):
         import httpx2
         from mcp.client.streamable_http import streamable_http_client
         from mcp import Client
+        async def _oauth_json_accept(request):
+            # GitHub's OAuth token endpoint defaults to form-encoded responses.
+            # The MCP SDK expects an RFC 6749 JSON token response, so request
+            # JSON explicitly for any form-encoded OAuth token exchange.
+            if request.headers.get("content-type", "").startswith(
+                "application/x-www-form-urlencoded"
+            ):
+                request.headers["Accept"] = "application/json"
+
         async with httpx2.AsyncClient(
             auth=provider,
             timeout=httpx2.Timeout(30.0, read=300.0),
+            event_hooks={"request": [_oauth_json_accept]},
         ) as http_client:
             transport = streamable_http_client(
                 connector["url"],
