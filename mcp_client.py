@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 _DISCOVERY_CACHE = {"key": None, "expires_at": 0.0, "schemas": []}
 _LAST_DIAGNOSTICS = []
 _CURRENT_SERVER_NAME: ContextVar[str] = ContextVar("mcp_server_name", default="")
+# Per-server cooldowns prevent a remote MCP server from being hammered after
+# authentication failures or rate limiting. The cooldown lives only for the
+# current process; the persistent tool catalog remains in _DISCOVERY_CACHE.
+_DISCOVERY_BACKOFF: dict[str, tuple[float, str]] = {}
 
 
 def _safe_tool_component(value):
@@ -73,6 +77,65 @@ def _component_name(tool_name, _server_info):
     return f"{_safe_tool_component(server_name)}__{_safe_tool_component(tool_name)}"
 
 
+def _oauth_access_token(config):
+    """Return a stored OAuth access token for a persistent connector, if any."""
+    if not getattr(config, "connector_id", None):
+        return None
+    try:
+        from mcp_oauth import oauth_access_token
+        return oauth_access_token(config.connector_id)
+    except Exception:
+        return None
+
+
+def _request_headers(config):
+    """Build request headers, including a persisted OAuth bearer token.
+
+    ClientSessionGroup currently accepts static headers rather than an
+    httpx.Auth provider, so persisted MCP OAuth tokens must be bridged into
+    the header-based ServerParameters path. Direct tool execution uses the
+    same headers.
+    """
+    headers = dict(config.headers or {})
+    if not any(str(key).lower() == "authorization" for key in headers):
+        token = _oauth_access_token(config)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _exception_status_code(exc):
+    for candidate in (
+        getattr(exc, "status_code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+    ):
+        try:
+            if candidate is not None:
+                return int(candidate)
+        except (TypeError, ValueError):
+            pass
+    text = str(exc).lower()
+    for code in (401, 403, 429):
+        if str(code) in text:
+            return code
+    return None
+
+
+def _server_backoff(config_name, status_code, error_text):
+    if status_code == 401:
+        seconds = 300.0
+    elif status_code == 429:
+        seconds = 600.0
+    elif status_code in {403}:
+        seconds = 300.0
+    else:
+        seconds = 30.0
+    _DISCOVERY_BACKOFF[config_name] = (
+        __import__("time").monotonic() + seconds,
+        error_text,
+    )
+
+
 def _server_params(config):
     timeout = _timeout_seconds()
     if config.transport not in {"streamable-http", "sse"}:
@@ -93,14 +156,14 @@ def _server_params(config):
     if config.transport == "streamable-http":
         return StreamableHttpParameters(
             url=config.url,
-            headers=config.headers or {},
+            headers=_request_headers(config),
             timeout=timeout,
             sse_read_timeout=max(timeout, 300.0),
             terminate_on_close=True,
         )
     return SseServerParameters(
         url=config.url,
-        headers=config.headers or {},
+        headers=_request_headers(config),
         timeout=timeout,
         sse_read_timeout=max(timeout, 300.0),
     )
@@ -218,12 +281,40 @@ async def _discover_group(configs):
 
     async with ClientSessionGroup(component_name_hook=_component_name) as group:
         for config in configs:
+            now = __import__("time").monotonic()
+            cooldown = _DISCOVERY_BACKOFF.get(config.name)
+            if cooldown and now < cooldown[0]:
+                diagnostics.append({
+                    "name": config.name,
+                    "error": cooldown[1],
+                    "backoff": True,
+                })
+                logger.warning(
+                    "Skipping MCP discovery for %s during backoff: %s",
+                    config.name,
+                    cooldown[1],
+                )
+                continue
+            _DISCOVERY_BACKOFF.pop(config.name, None)
             token = _CURRENT_SERVER_NAME.set(config.name)
             try:
                 await group.connect_to_server(_server_params(config))
+                _DISCOVERY_BACKOFF.pop(config.name, None)
             except Exception as exc:
-                diagnostics.append({"name": config.name, "error": str(exc).strip()[:500] or exc.__class__.__name__})
-                logger.warning("MCP connection failed for %s: %s", config.name, exc)
+                error_text = str(exc).strip()[:500] or exc.__class__.__name__
+                status_code = _exception_status_code(exc)
+                _server_backoff(config.name, status_code, error_text)
+                diagnostics.append({
+                    "name": config.name,
+                    "error": error_text,
+                    "status_code": status_code,
+                })
+                logger.warning(
+                    "MCP connection failed for %s (status=%s, backoff active): %s",
+                    config.name,
+                    status_code,
+                    exc,
+                )
             finally:
                 _CURRENT_SERVER_NAME.reset(token)
 
@@ -285,7 +376,7 @@ def discover_tool_schemas():
     key = _registry_key()
     now = __import__("time").monotonic()
     try:
-        ttl = float(os.getenv("MCP_DISCOVERY_TTL_SECONDS", "60"))
+        ttl = float(os.getenv("MCP_DISCOVERY_TTL_SECONDS", "300"))
     except ValueError:
         ttl = 60.0
     ttl = max(1.0, min(ttl, 600.0))
@@ -379,7 +470,7 @@ async def _call_group_tool(name, arguments):
     if config.transport == "streamable-http":
         http_timeout = httpx2.Timeout(timeout, read=max(timeout, 300.0))
         async with httpx2.AsyncClient(
-            headers=config.headers or {},
+            headers=_request_headers(config),
             timeout=http_timeout,
         ) as http_client:
             transport = streamable_http_client(
