@@ -345,11 +345,7 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
     return f"⚠️ Max tool iterations ({MAX_ITERATIONS}) reached — task incomplete reh gaya."
 
 def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, memory_enabled=True, web_search_enabled=True):
-    """Execute tools first when required, then stream the final assistant response.
-
-    This keeps the frontend streaming endpoint compatible with calculator/web/file/MCP
-    tools instead of silently disabling tool calls.
-    """
+    """Execute tools first when required, then stream the final assistant response."""
     goal = goal.strip()
     if not goal:
         yield "Please enter a message."
@@ -373,9 +369,6 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
         memory_enabled=memory_enabled,
         tool_budget=bool(tool_schemas),
     )
-    # A dynamically discovered MCP tool makes an otherwise "simple" task
-    # tool-bearing. Give the execution loop enough room for tool -> result ->
-    # final-answer, without changing the static planner.
     tool_round_limit = min(
         MAX_ITERATIONS,
         max(execution_plan.max_tool_rounds, 4 if tool_schemas else 1),
@@ -386,52 +379,11 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
             {"type": "image_url", "image_url": {"url": url}} for url in image_urls
         ]
 
-    # Fast path: ordinary conversational messages do not need a non-streaming
-    # tool-selection round. Stream the model response directly so simple messages
-    # require one Groq request instead of two.
-    if not tool_schemas:
-        # Streaming connections can fail transiently (provider 5xx/429,
-        # connection resets, or short-lived network errors). Retry only when
-        # no tokens have reached the client yet; once partial output exists,
-        # retrying would duplicate text in the conversation.
-        for retry in range(MAX_RETRIES + 1):
-            parts = []
-            try:
-                stream = client.chat.completions.create(
-                    model=VISION_MODEL if image_urls else MODEL,
-                    messages=messages,
-                    temperature=0.4,
-                    stream=True,
-                )
-                for chunk in stream:
-                    delta = chunk.choices[0].delta.content if chunk.choices else None
-                    if delta:
-                        parts.append(delta)
-                        yield delta
-                answer = "".join(parts)
-                if answer:
-                    save_turn(session_id, goal, answer)
-                return
-            except Exception as exc:
-                logger.warning(
-                    "Fast streaming request failed (retry %s/%s): %s",
-                    retry,
-                    MAX_RETRIES,
-                    exc,
-                )
-                status_code = getattr(exc, "status_code", None)
-                non_retryable = status_code is not None and 400 <= status_code < 500 and status_code != 429
-                if parts or non_retryable or retry >= MAX_RETRIES:
-                    logger.exception("Fast streaming request failed permanently")
-                    yield "❌ Streaming request failed."
-                    return
-                time.sleep(2 ** retry)
-
     state = ExecutionState()
-    prepared_final_response = False
     while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
+
         for retry in range(MAX_RETRIES + 1):
             try:
                 request_kwargs = {
@@ -447,27 +399,43 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                 response = client.chat.completions.create(**request_kwargs)
                 break
             except Exception as exc:
-                logger.warning("Streaming preparation request failed (retry %s/%s, tools=%s): %s", retry, MAX_RETRIES, [s.get("function", {}).get("name") for s in tool_schemas], exc)
+                logger.warning(
+                    "Streaming preparation request failed (retry %s/%s, tools=%s): %s",
+                    retry,
+                    MAX_RETRIES,
+                    [s.get("function", {}).get("name") for s in tool_schemas],
+                    exc,
+                )
                 if retry < MAX_RETRIES:
                     time.sleep(2 ** retry)
+
         if response is None:
             yield "❌ Model/API request failed after retries. Model/tool schema compatibility issue ho sakta hai; server logs me exact error recorded hai."
             return
 
         msg = response.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
+
         if not msg.tool_calls:
-            prepared_final_response = True
-            break
+            answer = msg.content or ""
+            if answer:
+                words = answer.split(" ")
+                for i, word in enumerate(words):
+                    yield word + (" " if i < len(words) - 1 else "")
+            save_turn(session_id, goal, answer)
+            return
 
         for call in msg.tool_calls:
             name = call.function.name
             state.tool_calls += 1
             state.last_tool = name
+            yield "🔧 Calling tool: " + name + "...\n\n"
+
             try:
                 args = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
+
             result = _execute_tool(name, args)
             validated = validate_tool_result(result)
             messages.append({
@@ -476,6 +444,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                 "name": name,
                 "content": validated.content,
             })
+
             if validated.ok:
                 state.consecutive_failures = 0
             else:
@@ -485,48 +454,13 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                     "content": recovery_instruction(name, validated),
                 })
 
-    if state.consecutive_failures >= 2:
-        yield "⚠️ Tool execution repeatedly failed."
-        return
-    if not prepared_final_response and state.round_number >= tool_round_limit:
-        yield "⚠️ Max tool iterations reached — task incomplete reh gaya."
-        return
-
-    # The final streaming call can also fail transiently. As above, retry
-    # only before any token is emitted so the client never receives duplicate
-    # partial answers.
-    for retry in range(MAX_RETRIES + 1):
-        parts = []
-        try:
-            stream = client.chat.completions.create(
-                model=VISION_MODEL if image_urls else MODEL,
-                messages=messages,
-                temperature=0.4,
-                stream=True,
-            )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content if chunk.choices else None
-                if delta:
-                    parts.append(delta)
-                    yield delta
-            answer = "".join(parts)
-            if answer:
-                save_turn(session_id, goal, answer)
+        if state.consecutive_failures >= 2:
+            yield "⚠️ Tool execution repeatedly failed."
             return
-        except Exception as exc:
-            logger.warning(
-                "Streaming final model request failed (retry %s/%s): %s",
-                retry,
-                MAX_RETRIES,
-                exc,
-            )
-            status_code = getattr(exc, "status_code", None)
-            non_retryable = status_code is not None and 400 <= status_code < 500 and status_code != 429
-            if parts or non_retryable or retry >= MAX_RETRIES:
-                logger.exception("Streaming final model request failed permanently")
-                yield "❌ Streaming request failed."
-                return
-            time.sleep(2 ** retry)
+
+        if state.round_number >= tool_round_limit:
+            yield f"⚠️ Max tool iterations ({tool_round_limit}) reached — task incomplete reh gaya."
+            return
 
 def interactive():
     session_id = os.getenv("AGENT_SESSION", "default")
