@@ -62,3 +62,56 @@ def test_dynamic_tool_routing_does_not_fallback_to_unrelated_tools():
         }
     ]
     assert select_relevant_tools(schemas, "Explain quantum tunneling", max_tools=4) == []
+
+
+def test_tool_selector_caps_active_catalog():
+    from orchestration import select_relevant_tools
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": f"mcp__server__tool_{i}",
+                "description": f"Search repository content topic {i}",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        for i in range(8)
+    ]
+    assert len(select_relevant_tools(schemas, "search repository content", max_tools=4)) == 4
+
+
+def test_tool_schema_compaction_removes_verbose_metadata():
+    from agent import _compact_tool_schema
+    schema = {
+        "type": "function",
+        "function": {
+            "name": "mcp__server__search",
+            "description": "x" * 5000,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "verbose" * 1000,
+                        "title": "Query",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    }
+    compact = _compact_tool_schema(schema)
+    assert len(compact["function"]["description"]) == 800
+    assert "description" not in compact["function"]["parameters"]["properties"]["query"]
+    assert compact["function"]["parameters"]["required"] == ["query"]
+
+
+def test_tool_context_budget_is_lower_than_normal_context(monkeypatch):
+    from agent import build_messages
+    monkeypatch.setenv("MAX_CONTEXT_CHARS", "24000")
+    monkeypatch.setenv("MAX_TOOL_CONTEXT_CHARS", "12000")
+    normal = build_messages("Hello", "test-budget", tool_budget=False)
+    tool_mode = build_messages("Hello", "test-budget", tool_budget=True)
+    assert sum(len(str(item.get("content", ""))) for item in tool_mode) <= sum(
+        len(str(item.get("content", ""))) for item in normal
+    )
