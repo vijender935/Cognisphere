@@ -44,7 +44,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response=await call_next(request); response.headers.setdefault("X-Content-Type-Options","nosniff"); response.headers.setdefault("X-Frame-Options","DENY"); response.headers.setdefault("Referrer-Policy","strict-origin-when-cross-origin"); return response
 app.add_middleware(SecurityHeadersMiddleware)
 
-PUBLIC_API_PATHS={"/health","/api/v1/info","/api/v1/auth/status","/api/v1/auth/setup","/api/v1/auth/login"}
+PUBLIC_API_PATHS={"/health","/api/v1/info","/api/v1/auth/status","/api/v1/auth/setup","/api/v1/auth/login","/api/v1/mcp/oauth/callback"}
 @app.middleware("http")
 async def authentication_middleware(request:Request,call_next):
     if request.method=="OPTIONS" or request.url.path in PUBLIC_API_PATHS or not request.url.path.startswith("/api/v1/"):
