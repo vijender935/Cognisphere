@@ -204,6 +204,13 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
     client = Groq(api_key=api_key)
     messages = build_messages(goal, session_id, rag_sources=rag_sources, memory_enabled=memory_enabled)
     tool_schemas = _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    # A dynamically discovered MCP tool makes an otherwise "simple" task
+    # tool-bearing. Give the execution loop enough room for tool -> result ->
+    # final-answer, without changing the static planner.
+    tool_round_limit = min(
+        MAX_ITERATIONS,
+        max(execution_plan.max_tool_rounds, 4 if tool_schemas else 1),
+    )
 
     if image_urls:
         messages[-1]["content"] = [{"type": "text", "text": goal}] + [
@@ -212,7 +219,7 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
 
     state = ExecutionState()
     prepared_final_response = False
-    while should_continue_execution(state, min(MAX_ITERATIONS, execution_plan.max_tool_rounds)):
+    while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
         for retry in range(MAX_RETRIES + 1):
@@ -291,6 +298,13 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
     client = Groq(api_key=api_key)
     messages = build_messages(goal, session_id, rag_sources=rag_sources, memory_enabled=memory_enabled)
     tool_schemas = _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    # A dynamically discovered MCP tool makes an otherwise "simple" task
+    # tool-bearing. Give the execution loop enough room for tool -> result ->
+    # final-answer, without changing the static planner.
+    tool_round_limit = min(
+        MAX_ITERATIONS,
+        max(execution_plan.max_tool_rounds, 4 if tool_schemas else 1),
+    )
 
     if image_urls:
         messages[-1]["content"] = [{"type": "text", "text": goal}] + [
@@ -340,7 +354,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
 
     state = ExecutionState()
     prepared_final_response = False
-    while should_continue_execution(state, min(MAX_ITERATIONS, execution_plan.max_tool_rounds)):
+    while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
         for retry in range(MAX_RETRIES + 1):
@@ -396,7 +410,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
     if state.consecutive_failures >= 2:
         yield "⚠️ Tool execution repeatedly failed."
         return
-    if not prepared_final_response and state.round_number >= min(MAX_ITERATIONS, execution_plan.max_tool_rounds):
+    if not prepared_final_response and state.round_number >= tool_round_limit:
         yield "⚠️ Max tool iterations reached — task incomplete reh gaya."
         return
 
