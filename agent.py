@@ -142,7 +142,7 @@ def _tool_schemas_for(goal, web_search_enabled=True):
     if plan.needs_mcp:
         try:
             from mcp_client import discover_tool_schemas
-            schemas.extend(select_mcp_tools(discover_tool_schemas(), goal, max_tools=12))
+            schemas.extend(select_mcp_tools(discover_tool_schemas(), goal, max_tools=8))
         except Exception as exc:
             logger.warning("MCP discovery unavailable: %s", exc)
 
@@ -211,11 +211,11 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
                 )
                 break
             except Exception as exc:
-                logger.warning("Model request failed (retry %s): %s", retry, exc)
+                logger.warning("Model request failed (retry %s/%s, tools=%s): %s", retry, MAX_RETRIES, [s.get("function", {}).get("name") for s in tool_schemas], exc)
                 if retry < MAX_RETRIES:
                     time.sleep(2 ** retry)
         if response is None:
-            return "❌ Model/API request failed after retries. Logs me details available hain."
+            return "❌ Model/API request failed after retries. Model/tool schema compatibility issue ho sakta hai; server logs me exact error recorded hai."
 
         msg = response.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
@@ -341,11 +341,11 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                 response = client.chat.completions.create(**request_kwargs)
                 break
             except Exception as exc:
-                logger.warning("Streaming preparation request failed (retry %s): %s", retry, exc)
+                logger.warning("Streaming preparation request failed (retry %s/%s, tools=%s): %s", retry, MAX_RETRIES, [s.get("function", {}).get("name") for s in tool_schemas], exc)
                 if retry < MAX_RETRIES:
                     time.sleep(2 ** retry)
         if response is None:
-            yield "❌ Model/API request failed after retries."
+            yield "❌ Model/API request failed after retries. Model/tool schema compatibility issue ho sakta hai; server logs me exact error recorded hai."
             return
 
         msg = response.choices[0].message
