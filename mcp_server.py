@@ -57,7 +57,8 @@ def add_knowledge(source: str, content: str) -> str:
 @mcp.tool()
 def add_knowledge_file(path: str) -> str:
     """Index a text file from the configured file sandbox into the RAG knowledge base."""
-    candidate = ensure_local_file(path)\n    return f"Indexed {index_document(path, extract_and_limit(candidate), replace_source=True)} chunks from {path}."
+    candidate = ensure_local_file(path)
+    return f"Indexed {index_document(path, extract_and_limit(candidate), replace_source=True)} chunks from {path}."
 
 
 @mcp.tool()
