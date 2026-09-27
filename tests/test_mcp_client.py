@@ -95,3 +95,17 @@ def test_static_oauth_client_info_skips_dynamic_registration(monkeypatch):
  assert storage.info.client_id=="client-123"
  assert storage.info.client_secret=="secret-456"
  assert storage.info.token_endpoint_auth_method=="client_secret_post"
+
+def test_stdio_mcp_client_roundtrip(monkeypatch):
+    import os, sys, mcp_client
+    from mcp_registry import MCPServerConfig
+
+    cfg = MCPServerConfig(
+        name="local_stdio",
+        transport="stdio",
+        command=sys.executable,
+        args=("mcp_server.py",),
+    )
+    monkeypatch.setattr(mcp_client, "load_server_configs", lambda: [cfg])
+    res = mcp_client.call_tool("mcp__local_stdio__calculate", {"expression": "25 * 4"})
+    assert "100" in res
