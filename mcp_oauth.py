@@ -6,9 +6,16 @@ from urllib.parse import parse_qs,urlparse
 from config import ensure_directories
 from db import connect
 def oauth_redirect_uri():
-    base=os.getenv("PUBLIC_BASE_URL","").strip().rstrip("/")
-    if not base: base=os.getenv("API_BASE_URL","").strip().rstrip("/")
-    if not base: base="http://127.0.0.1:8000"
+    # OAuth callbacks must always terminate on the API service, not the frontend.
+    # An explicit full callback URL can override deployment-specific proxying.
+    explicit=os.getenv("MCP_OAUTH_REDIRECT_URI","").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    base=os.getenv("API_BASE_URL","").strip().rstrip("/")
+    if not base:
+        base=os.getenv("PUBLIC_BASE_URL","").strip().rstrip("/")
+    if not base:
+        base="http://127.0.0.1:8000"
     return base+"/api/v1/mcp/oauth/callback"
 def init_oauth_db():
     ensure_directories()
@@ -45,16 +52,33 @@ def _static_client_config(connector):
         return None
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        # Be tolerant of a value accidentally JSON-encoded twice in Render.
+        if isinstance(data, str):
+            data = json.loads(data)
+    except (json.JSONDecodeError, TypeError) as exc:
         raise ValueError("MCP_OAUTH_CLIENTS_JSON must contain valid JSON.") from exc
     if not isinstance(data, dict):
         raise ValueError("MCP_OAUTH_CLIENTS_JSON must be a JSON object.")
 
-    candidates = [str(connector["id"]), connector["name"]]
-    safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in connector["name"]).strip("_")
-    if safe_name and safe_name not in candidates:
-        candidates.append(safe_name)
-    item = next((data[key] for key in candidates if isinstance(data.get(key), dict)), None)
+    connector_name = str(connector["name"]).strip()
+    safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in connector_name).strip("_")
+    candidates = [str(connector["id"]), connector_name, safe_name]
+    # Match connector names case-insensitively so display casing cannot
+    # silently fall back to dynamic client registration.
+    normalized = {str(key).strip().casefold(): value for key, value in data.items()}
+    item = next(
+        (value for key in candidates if isinstance((value := data.get(key)), dict)),
+        None,
+    )
+    if item is None:
+        item = next(
+            (
+                normalized.get(key.strip().casefold())
+                for key in candidates
+                if isinstance(normalized.get(key.strip().casefold()), dict)
+            ),
+            None,
+        )
     if not item:
         return None
     client_id = item.get("client_id")
@@ -77,6 +101,13 @@ def _static_client_config(connector):
 async def _prime_static_client_info(storage, connector, redirect_uri):
     """Preload a registered OAuth client so the SDK skips DCR when configured."""
     config = _static_client_config(connector)
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "MCP OAuth static client lookup connector=%s configured=%s",
+        connector["name"],
+        bool(config),
+    )
     if not config:
         return False
     existing = await storage.get_client_info()
@@ -96,9 +127,15 @@ async def _prime_static_client_info(storage, connector, redirect_uri):
     # If a previous DCR registration is being replaced by a static client,
     # discard its tokens; refresh tokens are bound to the previous client.
     if existing and existing.client_id != client_info.client_id:
+        # Static credentials replace any stale DCR client and refresh token.
         storage._write(None, client_info.model_dump(mode="json"))
     else:
         await storage.set_client_info(client_info)
+    logger.info(
+        "MCP OAuth static client loaded connector=%s client_id_suffix=%s",
+        connector["name"],
+        config["client_id"][-6:],
+    )
     return True
 
 
