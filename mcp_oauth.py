@@ -90,10 +90,18 @@ async def _run_flow(flow_id,flow,redirect_uri):
     provider=OAuthClientProvider(server_url=connector["url"],client_metadata=OAuthClientMetadata(client_name="Personal AI Assistant",redirect_uris=[AnyUrl(redirect_uri)],application_type="web"),storage=storage,redirect_handler=redirect_handler,callback_handler=callback_handler)
     import httpx2
     from mcp.client.streamable_http import streamable_http_client
-    async with httpx2.AsyncClient(auth=provider) as http_client:
-        async with streamable_http_client(connector["url"],http_client=http_client) as transport:
-            from mcp import Client
-            async with Client(transport) as client: await client.list_tools()
+    from mcp import Client
+    async with httpx2.AsyncClient(
+        auth=provider,
+        timeout=httpx2.Timeout(30.0, read=300.0),
+    ) as http_client:
+        transport = streamable_http_client(
+            connector["url"],
+            http_client=http_client,
+            terminate_on_close=True,
+        )
+        async with Client(transport) as client:
+            await client.list_tools()
     if not flow.ready.done():flow.ready.set_result(flow.auth_url or "")
 
 async def begin_oauth(connector_id,redirect_uri):
