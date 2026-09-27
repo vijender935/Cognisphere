@@ -20,3 +20,45 @@ def test_select_mcp_tools():
 def test_agent_simple_schemas():
  from agent import _tool_schemas_for
  assert _tool_schemas_for("Hi")==[]
+
+def test_dynamic_tool_routing_uses_descriptions_and_parameters():
+    from orchestration import select_relevant_tools
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": "mcp__any_server__process_assets",
+                "description": "Process images from a cloud drive.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_id": {"type": "string", "description": "Drive file identifier"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "mcp__any_server__list_users",
+                "description": "List user accounts.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+    selected = select_relevant_tools(schemas, "Drive se image process karo", max_tools=1)
+    assert selected[0]["function"]["name"].endswith("__process_assets")
+
+
+def test_dynamic_tool_routing_does_not_fallback_to_unrelated_tools():
+    from orchestration import select_relevant_tools
+    schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": "mcp__server__list_users",
+                "description": "List user accounts.",
+            },
+        }
+    ]
+    assert select_relevant_tools(schemas, "Explain quantum tunneling", max_tools=4) == []

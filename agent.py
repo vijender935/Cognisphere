@@ -5,7 +5,7 @@ from groq import Groq
 from config import MAX_HISTORY_MESSAGES, MAX_ITERATIONS, MAX_RETRIES, MODEL, VISION_MODEL
 from orchestration import (
     ExecutionState, build_execution_plan, plan_prompt, plan_task,
-    recovery_instruction, select_mcp_tools, should_continue_execution,
+    recovery_instruction, select_relevant_tools, should_continue_execution,
     validate_tool_result,
 )
 from tools import TOOL_FUNCTIONS, TOOL_SCHEMAS, init_db, load_history, semantic_recall_memories, remember_fact, save_turn
@@ -116,38 +116,52 @@ def build_messages(goal, session_id, rag_sources=None, memory_enabled=True):
     return messages
 
 def _tool_schemas_for(goal, web_search_enabled=True):
-    """Return only tools appropriate for the classified request.
+    """Build a small tool catalog using live MCP metadata.
 
-    Simple conversational messages intentionally receive no tool schemas. This
-    prevents the model from inventing tool calls for greetings/chitchat and
-    avoids entering the tool loop when no external action is needed.
+    MCP discovery is independent of static intent keywords. Every non-empty
+    request is compared against the currently advertised MCP tools, so adding
+    or removing a server/tool does not require code changes.
     """
-    plan = plan_task(goal)
-    if plan.complexity == "simple":
+    goal = goal.strip()
+    if not goal:
         return []
 
-    schemas = []
+    plan = plan_task(goal)
+    candidates = []
+
     if plan.needs_web and web_search_enabled:
-        schemas.extend(
+        candidates.extend(
             schema for schema in TOOL_SCHEMAS
             if schema.get("function", {}).get("name") == "web_search"
         )
-    if plan.needs_local_tools:
-        local_names = {"calculator", "read_file", "write_file", "run_shell"}
-        schemas.extend(
-            schema for schema in TOOL_SCHEMAS
-            if schema.get("function", {}).get("name") in local_names
-        )
 
-    if plan.needs_mcp:
-        try:
-            from mcp_client import discover_tool_schemas
-            schemas.extend(select_mcp_tools(discover_tool_schemas(), goal, max_tools=8))
-        except Exception as exc:
-            logger.warning("MCP discovery unavailable: %s", exc)
+    local_candidates = []
+    if plan.needs_local_tools:
+        local_candidates = [
+            schema for schema in TOOL_SCHEMAS
+            if schema.get("function", {}).get("name")
+            in {"calculator", "read_file", "write_file", "run_shell"}
+        ]
+
+    mcp_candidates = []
+    try:
+        from mcp_client import discover_tool_schemas
+        mcp_candidates = discover_tool_schemas()
+    except Exception as exc:
+        logger.warning("MCP discovery unavailable: %s", exc)
+
+    # Route both local and MCP candidates through the same metadata-driven
+    # selector. This prevents a generic local tool from winning simply because
+    # a static keyword happened to match the request.
+    routed_candidates = select_relevant_tools(
+        local_candidates + mcp_candidates,
+        goal,
+        max_tools=8,
+    )
+    candidates.extend(routed_candidates)
 
     unique = {}
-    for schema in schemas:
+    for schema in candidates:
         name = schema.get("function", {}).get("name")
         if name:
             unique[name] = schema
@@ -190,6 +204,13 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
     client = Groq(api_key=api_key)
     messages = build_messages(goal, session_id, rag_sources=rag_sources, memory_enabled=memory_enabled)
     tool_schemas = _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    # A dynamically discovered MCP tool makes an otherwise "simple" task
+    # tool-bearing. Give the execution loop enough room for tool -> result ->
+    # final-answer, without changing the static planner.
+    tool_round_limit = min(
+        MAX_ITERATIONS,
+        max(execution_plan.max_tool_rounds, 4 if tool_schemas else 1),
+    )
 
     if image_urls:
         messages[-1]["content"] = [{"type": "text", "text": goal}] + [
@@ -198,7 +219,7 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
 
     state = ExecutionState()
     prepared_final_response = False
-    while should_continue_execution(state, min(MAX_ITERATIONS, execution_plan.max_tool_rounds)):
+    while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
         for retry in range(MAX_RETRIES + 1):
@@ -277,6 +298,13 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
     client = Groq(api_key=api_key)
     messages = build_messages(goal, session_id, rag_sources=rag_sources, memory_enabled=memory_enabled)
     tool_schemas = _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    # A dynamically discovered MCP tool makes an otherwise "simple" task
+    # tool-bearing. Give the execution loop enough room for tool -> result ->
+    # final-answer, without changing the static planner.
+    tool_round_limit = min(
+        MAX_ITERATIONS,
+        max(execution_plan.max_tool_rounds, 4 if tool_schemas else 1),
+    )
 
     if image_urls:
         messages[-1]["content"] = [{"type": "text", "text": goal}] + [
@@ -326,7 +354,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
 
     state = ExecutionState()
     prepared_final_response = False
-    while should_continue_execution(state, min(MAX_ITERATIONS, execution_plan.max_tool_rounds)):
+    while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
         for retry in range(MAX_RETRIES + 1):
@@ -382,7 +410,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
     if state.consecutive_failures >= 2:
         yield "⚠️ Tool execution repeatedly failed."
         return
-    if not prepared_final_response and state.round_number >= min(MAX_ITERATIONS, execution_plan.max_tool_rounds):
+    if not prepared_final_response and state.round_number >= tool_round_limit:
         yield "⚠️ Max tool iterations reached — task incomplete reh gaya."
         return
 
