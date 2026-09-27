@@ -136,6 +136,25 @@ def oauth_token_present(connector_id):
     try:return bool(json.loads(row[0]).get("access_token"))
     except (TypeError,json.JSONDecodeError):return False
 
+def oauth_access_token(connector_id):
+    """Return the persisted OAuth access token for MCP HTTP requests."""
+    _connector(connector_id)
+    init_oauth_db()
+    with connect() as con:
+        row = con.execute(
+            "SELECT tokens FROM mcp_oauth_credentials WHERE connector_id=?",
+            (connector_id,),
+        ).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        tokens = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    token = tokens.get("access_token") if isinstance(tokens, dict) else None
+    return token if isinstance(token, str) and token.strip() else None
+
+
 def oauth_status(connector_id):
     _connector(connector_id); storage=DatabaseOAuthStorage(connector_id)
     async def read():return await storage.get_tokens()
