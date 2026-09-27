@@ -54,3 +54,44 @@ def test_component_name_alias_keeps_tools_for_connector_names_with_spaces():
  indexed=mcp_client._configs_by_component_name([config])
  assert indexed["Search Image"] is config
  assert indexed["Search_Image"] is config
+
+
+def test_static_oauth_client_config_is_connector_agnostic(monkeypatch):
+ import mcp_oauth
+ monkeypatch.setenv(
+  "MCP_OAUTH_CLIENTS_JSON",
+  '{"Github":{"client_id":"client-123","client_secret":"secret-456","token_endpoint_auth_method":"client_secret_post"}}',
+ )
+ config=mcp_oauth._static_client_config({"id":42,"name":"Github"})
+ assert config["client_id"]=="client-123"
+ assert config["client_secret"]=="secret-456"
+ assert config["token_endpoint_auth_method"]=="client_secret_post"
+
+
+def test_static_oauth_client_info_skips_dynamic_registration(monkeypatch):
+ import asyncio
+ import mcp_oauth
+ monkeypatch.setenv(
+  "MCP_OAUTH_CLIENTS_JSON",
+  '{"Github":{"client_id":"client-123","client_secret":"secret-456"}}',
+ )
+
+ class Storage:
+  def __init__(self):
+   self.info=None
+  async def get_client_info(self):
+   return self.info
+  async def set_client_info(self, info):
+   self.info=info
+
+ storage=Storage()
+ asyncio.run(
+  mcp_oauth._prime_static_client_info(
+   storage,
+   {"id":42,"name":"Github"},
+   "https://personal-ai-assistant-api-dwp6.onrender.com/api/v1/mcp/oauth/callback",
+  )
+ )
+ assert storage.info.client_id=="client-123"
+ assert storage.info.client_secret=="secret-456"
+ assert storage.info.token_endpoint_auth_method=="client_secret_post"
