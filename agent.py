@@ -206,6 +206,26 @@ def _prepare_tool_schemas(schemas):
     return [_compact_tool_schema(schema) for schema in schemas[:4]]
 
 
+def _tool_choice_for_round(task_plan, state, tool_schemas):
+    """Force a relevant tool on the first model turn when the planner says one is needed.
+
+    Groq defaults to tool_choice=auto, which lets the model answer from its own
+    knowledge even when the application deliberately selected a relevant tool.
+    For explicit web/local/MCP tasks, the first turn must therefore produce a
+    tool call. Later turns return to auto so the model can stop after receiving
+    the result.
+    """
+    if not tool_schemas:
+        return None
+    if state.tool_calls == 0 and (
+        task_plan.needs_web
+        or task_plan.needs_local_tools
+        or task_plan.needs_mcp
+    ):
+        return "required"
+    return "auto"
+
+
 def _execute_tool(name, args):
     try:
         fn = TOOL_FUNCTIONS.get(name)
@@ -274,7 +294,7 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
                 response = client.chat.completions.create(
                     model=VISION_MODEL if image_urls else MODEL,
                     messages=messages,
-                    **({"tools": tool_schemas, "tool_choice": "auto"} if tool_schemas else {}),
+                    **({"tools": tool_schemas, "tool_choice": _tool_choice_for_round(task_plan, state, tool_schemas)} if tool_schemas else {}),
                     temperature=0.4,
                 )
                 break
@@ -420,7 +440,10 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                     "temperature": 0.4,
                 }
                 if tool_schemas:
-                    request_kwargs.update({"tools": tool_schemas, "tool_choice": "auto"})
+                    request_kwargs.update({
+                        "tools": tool_schemas,
+                        "tool_choice": _tool_choice_for_round(task_plan, state, tool_schemas),
+                    })
                 response = client.chat.completions.create(**request_kwargs)
                 break
             except Exception as exc:
