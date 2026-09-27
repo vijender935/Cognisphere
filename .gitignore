@@ -15,3 +15,6 @@ agent_memory.db
 .gradio/
 .DS_Store
 Thumbs.db
+frontend/dist/
+frontend/node_modules/
+frontend/package-lock.json
