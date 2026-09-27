@@ -244,6 +244,20 @@ def _groq_json_schema(schema, *, nullable=False):
     return out
 
 
+def _configs_by_component_name(configs):
+    """Index configs by both persisted and component-safe server names.
+
+    ClientSessionGroup keys are generated through _component_name(), which
+    sanitizes connector names for safe tool identifiers. The persisted
+    connector name must still be preserved for configuration lookups.
+    """
+    indexed = {}
+    for config in configs:
+        indexed[config.name] = config
+        indexed[_safe_tool_component(config.name)] = config
+    return indexed
+
+
 def _schemas_from_group(group, configs_by_name):
     schemas = []
     for qualified_name, tool in group.tools.items():
@@ -277,7 +291,7 @@ def _schemas_from_group(group, configs_by_name):
 async def _discover_group(configs):
     diagnostics = []
     schemas = []
-    configs_by_name = {config.name: config for config in configs}
+    configs_by_name = _configs_by_component_name(configs)
 
     async with ClientSessionGroup(component_name_hook=_component_name) as group:
         for config in configs:
