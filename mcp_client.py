@@ -138,6 +138,12 @@ def _server_backoff(config_name, status_code, error_text):
 
 def _server_params(config):
     timeout = _timeout_seconds()
+    if config.transport == "stdio":
+        from mcp import StdioServerParameters
+        return StdioServerParameters(
+            command=config.command,
+            args=list(config.args or []),
+        )
     if config.transport not in {"streamable-http", "sse"}:
         raise ValueError(f"Unsupported MCP transport: {config.transport}")
     if not config.url:
@@ -501,7 +507,7 @@ async def _call_group_tool(name, arguments):
     elif config.transport == "sse":
         transport = sse_client(
             config.url,
-            headers=config.headers or {},
+            headers=_request_headers(config),
             timeout=timeout,
             sse_read_timeout=max(timeout, 300.0),
         )
@@ -511,6 +517,23 @@ async def _call_group_tool(name, arguments):
                 arguments or {},
                 read_timeout_seconds=timeout,
             )
+    elif config.transport == "stdio":
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        server_params = StdioServerParameters(
+            command=config.command,
+            args=list(config.args or []),
+        )
+        async with stdio_client(server_params) as (read, write):
+            from mcp import ClientSession
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    original_tool_name,
+                    arguments or {},
+                    read_timeout_seconds=timeout,
+                )
     else:
         raise ValueError(f"Unsupported MCP transport: {config.transport}")
 
