@@ -103,6 +103,32 @@ def _server_params(config):
     )
 
 
+def _groq_json_schema(schema):
+    """Normalize MCP JSON Schema to the subset accepted by function calling."""
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    allowed = {"type", "properties", "required", "description", "enum", "items", "additionalProperties"}
+    out = {key: value for key, value in schema.items() if key in allowed}
+    if out.get("type") != "object":
+        out = {"type": "object", "properties": {}}
+    props = out.get("properties")
+    if not isinstance(props, dict):
+        out["properties"] = {}
+    else:
+        out["properties"] = {
+            str(name): _groq_json_schema(value) if isinstance(value, dict) and value.get("type") == "object"
+            else {key: value for key, value in value.items() if key in allowed} if isinstance(value, dict)
+            else {"type": "string"}
+            for name, value in props.items()
+        }
+    required = out.get("required")
+    if isinstance(required, list):
+        out["required"] = [str(x) for x in required if str(x) in out["properties"]]
+    else:
+        out.pop("required", None)
+    return out
+
+
 def _schemas_from_group(group, configs_by_name):
     schemas = []
     for qualified_name, tool in group.tools.items():
@@ -115,14 +141,17 @@ def _schemas_from_group(group, configs_by_name):
         if not tool_allowed(config, tool.name):
             continue
         schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
-        if not schema:
-            schema = {"type": "object", "properties": {}}
+        schema = _groq_json_schema(schema or {"type": "object", "properties": {}})
+        name = f"mcp__{qualified_name}"
+        if len(name) > 64:
+            logger.warning("Skipping MCP tool with name longer than 64 characters: %s", name)
+            continue
         schemas.append(
             {
                 "type": "function",
                 "function": {
-                    "name": f"mcp__{qualified_name}",
-                    "description": getattr(tool, "description", None) or f"MCP tool {tool.name}",
+                    "name": name,
+                    "description": (getattr(tool, "description", None) or f"MCP tool {tool.name}")[:4096],
                     "parameters": schema,
                 },
             }
