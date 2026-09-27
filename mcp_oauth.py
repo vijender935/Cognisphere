@@ -161,31 +161,54 @@ def _cleanup_flows():
 
 async def _run_flow(flow_id,flow,redirect_uri):
     connector=_connector(flow.connector_id); storage=DatabaseOAuthStorage(flow.connector_id)
+
     async def redirect_handler(url):
         flow.auth_url=url
         try:
             flow.oauth_state=parse_qs(urlparse(url).query).get("state",[None])[0]
-            if flow.oauth_state:_STATE_TO_FLOW[flow.oauth_state]=flow_id
-        except Exception:flow.oauth_state=None
-        if not flow.ready.done():flow.ready.set_result(url)
-    async def callback_handler():return await flow.callback
-    static_client = await _prime_static_client_info(storage, connector, redirect_uri)
-    provider=OAuthClientProvider(server_url=connector["url"],client_metadata=OAuthClientMetadata(client_name="Personal AI Assistant",redirect_uris=[AnyUrl(redirect_uri)],application_type="web"),storage=storage,redirect_handler=redirect_handler,callback_handler=callback_handler)
-    import httpx2
-    from mcp.client.streamable_http import streamable_http_client
-    from mcp import Client
-    async with httpx2.AsyncClient(
-        auth=provider,
-        timeout=httpx2.Timeout(30.0, read=300.0),
-    ) as http_client:
-        transport = streamable_http_client(
-            connector["url"],
-            http_client=http_client,
-            terminate_on_close=True,
+            if flow.oauth_state:
+                _STATE_TO_FLOW[flow.oauth_state]=flow_id
+        except Exception:
+            flow.oauth_state=None
+        if not flow.ready.done():
+            flow.ready.set_result(url)
+
+    async def callback_handler():
+        return await flow.callback
+
+    try:
+        await _prime_static_client_info(storage, connector, redirect_uri)
+        provider=OAuthClientProvider(
+            server_url=connector["url"],
+            client_metadata=OAuthClientMetadata(
+                client_name="Personal AI Assistant",
+                redirect_uris=[AnyUrl(redirect_uri)],
+                application_type="web",
+            ),
+            storage=storage,
+            redirect_handler=redirect_handler,
+            callback_handler=callback_handler,
         )
-        async with Client(transport) as client:
-            await client.list_tools()
-    if not flow.ready.done():flow.ready.set_result(flow.auth_url or "")
+        import httpx2
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp import Client
+        async with httpx2.AsyncClient(
+            auth=provider,
+            timeout=httpx2.Timeout(30.0, read=300.0),
+        ) as http_client:
+            transport = streamable_http_client(
+                connector["url"],
+                http_client=http_client,
+                terminate_on_close=True,
+            )
+            async with Client(transport) as client:
+                await client.list_tools()
+        if not flow.ready.done():
+            flow.ready.set_result(flow.auth_url or "")
+    except Exception as exc:
+        if not flow.ready.done():
+            flow.ready.set_exception(exc)
+        raise
 
 async def begin_oauth(connector_id,redirect_uri):
     _cleanup_flows(); _connector(connector_id); flow_id=secrets.token_urlsafe(32); loop=asyncio.get_running_loop()
@@ -196,7 +219,7 @@ async def begin_oauth(connector_id,redirect_uri):
         _FLOWS.pop(flow_id,None)
         if flow.task and not flow.task.done():flow.task.cancel()
         raise
-    return {"flow_id":flow_id,"authorization_url":auth_url, "static_client": static_client if "static_client" in locals() else False}
+    return {"flow_id":flow_id,"authorization_url":auth_url}
 
 async def complete_oauth(flow_id,code,state=None,iss=None):
     _cleanup_flows(); flow=_FLOWS.get(flow_id)
