@@ -1,8 +1,8 @@
 import React from "react";
-import {Send,Paperclip,X,Globe,Brain,Plug} from "lucide-react";
+import {Send,Paperclip,X} from "lucide-react";
 import FileUpload from "./FileUpload";
 
-export default function Composer({text,setText,loading,send,stopStream,uploadFile,attachments,setAttachments,uploading,webSearch,setWebSearch,memory,setMemory,onConnectors}){
+export default function Composer({text,setText,loading,send,stopStream,uploadFile,attachments,setAttachments,uploading}){
  return <div className="composer-wrap">
   <div className="composer">
    <FileUpload onFiles={uploadFile} disabled={loading||uploading}/>
