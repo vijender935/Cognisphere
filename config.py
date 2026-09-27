@@ -7,7 +7,10 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("AGENT_DATA_DIR", BASE_DIR / "data")).expanduser().resolve()
 FILE_ROOT = Path(os.getenv("AGENT_FILE_ROOT", DATA_DIR / "files")).expanduser().resolve()
 
-MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+# Qwen is used as the safe default for this application because it supports
+# normal function/MCP tool calling without Groq's GPT-OSS server-side code
+# execution surface. GPT-OSS can still be selected explicitly with GROQ_MODEL.
+MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
 VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.8-27b")
 MAX_ITERATIONS = max(1, int(os.getenv("MAX_ITERATIONS", "8")))
 MAX_RETRIES = max(0, int(os.getenv("MAX_RETRIES", "2")))
