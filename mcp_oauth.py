@@ -20,6 +20,88 @@ def init_oauth_db():
         except Exception:
             pass
 
+def _static_client_config(connector):
+    """Load optional pre-registered OAuth credentials for a connector.
+
+    Some MCP authorization servers, including GitHub's remote MCP server,
+    do not support dynamic client registration. Credentials therefore need
+    to be pre-registered once and supplied securely through environment
+    configuration rather than hard-coded in the application.
+
+    Expected shape:
+      MCP_OAUTH_CLIENTS_JSON={
+        "Github": {
+          "client_id": "...",
+          "client_secret": "...",
+          "token_endpoint_auth_method": "client_secret_post"
+        }
+      }
+
+    Connector id and the component-safe connector name are also accepted as
+    keys so renaming a display name is not required to use the credentials.
+    """
+    raw = os.getenv("MCP_OAUTH_CLIENTS_JSON", "").strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("MCP_OAUTH_CLIENTS_JSON must contain valid JSON.") from exc
+    if not isinstance(data, dict):
+        raise ValueError("MCP_OAUTH_CLIENTS_JSON must be a JSON object.")
+
+    candidates = [str(connector["id"]), connector["name"]]
+    safe_name = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in connector["name"]).strip("_")
+    if safe_name and safe_name not in candidates:
+        candidates.append(safe_name)
+    item = next((data[key] for key in candidates if isinstance(data.get(key), dict)), None)
+    if not item:
+        return None
+    client_id = item.get("client_id")
+    client_secret = item.get("client_secret")
+    if not isinstance(client_id, str) or not client_id.strip():
+        raise ValueError(f"OAuth client_id is missing for connector {connector['name']!r}.")
+    if not isinstance(client_secret, str) or not client_secret.strip():
+        raise ValueError(f"OAuth client_secret is missing for connector {connector['name']!r}.")
+    method = item.get("token_endpoint_auth_method", "client_secret_post")
+    if method not in {"client_secret_post", "client_secret_basic"}:
+        raise ValueError("OAuth token_endpoint_auth_method must be client_secret_post or client_secret_basic.")
+    return {
+        "client_id": client_id.strip(),
+        "client_secret": client_secret,
+        "token_endpoint_auth_method": method,
+        "scope": item.get("scope"),
+    }
+
+
+async def _prime_static_client_info(storage, connector, redirect_uri):
+    """Preload a registered OAuth client so the SDK skips DCR when configured."""
+    config = _static_client_config(connector)
+    if not config:
+        return False
+    existing = await storage.get_client_info()
+    if existing and existing.client_id == config["client_id"]:
+        return True
+    client_info = OAuthClientInformationFull(
+        client_id=config["client_id"],
+        client_secret=config["client_secret"],
+        client_name="Personal AI Assistant",
+        redirect_uris=[AnyUrl(redirect_uri)],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        token_endpoint_auth_method=config["token_endpoint_auth_method"],
+        scope=config.get("scope"),
+        application_type="web",
+    )
+    # If a previous DCR registration is being replaced by a static client,
+    # discard its tokens; refresh tokens are bound to the previous client.
+    if existing and existing.client_id != client_info.client_id:
+        storage._write(None, client_info.model_dump(mode="json"))
+    else:
+        await storage.set_client_info(client_info)
+    return True
+
+
 def _connector(connector_id):
     from connectors import list_connectors
     connector=next((x for x in list_connectors() if x["id"]==connector_id),None)
@@ -87,6 +169,7 @@ async def _run_flow(flow_id,flow,redirect_uri):
         except Exception:flow.oauth_state=None
         if not flow.ready.done():flow.ready.set_result(url)
     async def callback_handler():return await flow.callback
+    static_client = await _prime_static_client_info(storage, connector, redirect_uri)
     provider=OAuthClientProvider(server_url=connector["url"],client_metadata=OAuthClientMetadata(client_name="Personal AI Assistant",redirect_uris=[AnyUrl(redirect_uri)],application_type="web"),storage=storage,redirect_handler=redirect_handler,callback_handler=callback_handler)
     import httpx2
     from mcp.client.streamable_http import streamable_http_client
@@ -108,12 +191,12 @@ async def begin_oauth(connector_id,redirect_uri):
     _cleanup_flows(); _connector(connector_id); flow_id=secrets.token_urlsafe(32); loop=asyncio.get_running_loop()
     flow=_OAuthFlow(connector_id=connector_id,ready=loop.create_future(),callback=loop.create_future(),created_at=time.time())
     _FLOWS[flow_id]=flow; flow.task=asyncio.create_task(_run_flow(flow_id,flow,redirect_uri))
-    try:auth_url=await asyncio.wait_for(asyncio.shield(flow.ready),timeout=15)
+    try:auth_url=await asyncio.wait_for(asyncio.shield(flow.ready),timeout=30)
     except Exception:
         _FLOWS.pop(flow_id,None)
         if flow.task and not flow.task.done():flow.task.cancel()
         raise
-    return {"flow_id":flow_id,"authorization_url":auth_url}
+    return {"flow_id":flow_id,"authorization_url":auth_url, "static_client": static_client if "static_client" in locals() else False}
 
 async def complete_oauth(flow_id,code,state=None,iss=None):
     _cleanup_flows(); flow=_FLOWS.get(flow_id)
