@@ -31,12 +31,13 @@ def _extract_memory_candidate(text):
             return text.strip()[len(prefix):].strip()
     return None
 
-def build_messages(goal, session_id, rag_sources=None, memory_enabled=True):
-    # Groq's on-demand tier currently enforces a relatively small TPM/request
-    # budget. Long conversations can otherwise grow past the limit and produce
-    # intermittent 413/token rate-limit failures. Keep the prompt bounded while
-    # preserving the newest turns.
-    max_context_chars = max(8000, int(os.getenv("MAX_CONTEXT_CHARS", "24000")))
+def build_messages(goal, session_id, rag_sources=None, memory_enabled=True, tool_budget=False):
+    # Groq applies an input-token budget independently of the model's large
+    # context window. Tool definitions are part of the input, so tool calls
+    # need a smaller conversation slice than ordinary chat.
+    default_context = int(os.getenv("MAX_CONTEXT_CHARS", "24000"))
+    tool_context = int(os.getenv("MAX_TOOL_CONTEXT_CHARS", "12000"))
+    max_context_chars = max(8000, tool_context if tool_budget else default_context)
     max_history = min(MAX_HISTORY_MESSAGES, max(4, int(os.getenv("MAX_CONTEXT_HISTORY", "12"))))
     history = load_history(session_id, max_history)
     plan = plan_task(goal)
@@ -151,12 +152,12 @@ def _tool_schemas_for(goal, web_search_enabled=True):
         logger.warning("MCP discovery unavailable: %s", exc)
 
     # Route both local and MCP candidates through the same metadata-driven
-    # selector. This prevents a generic local tool from winning simply because
-    # a static keyword happened to match the request.
+    # selector. Groq recommends keeping the active tool set small; the selector
+    # stays dynamic and metadata-driven rather than hardcoding server/tool names.
     routed_candidates = select_relevant_tools(
         local_candidates + mcp_candidates,
         goal,
-        max_tools=8,
+        max_tools=4,
     )
     candidates.extend(routed_candidates)
 
@@ -166,6 +167,44 @@ def _tool_schemas_for(goal, web_search_enabled=True):
         if name:
             unique[name] = schema
     return list(unique.values())
+
+def _compact_tool_schema(schema):
+    """Reduce tool-schema tokens without changing the callable contract."""
+    import copy
+
+    compact = copy.deepcopy(schema)
+    fn = compact.get("function", {})
+    if isinstance(fn, dict):
+        if isinstance(fn.get("description"), str):
+            fn["description"] = fn["description"][:800]
+        params = fn.get("parameters")
+        if isinstance(params, dict):
+            def compact_node(node):
+                if not isinstance(node, dict):
+                    return node
+                keep = {}
+                for key in ("type", "enum", "required", "properties", "items", "additionalProperties", "anyOf", "oneOf"):
+                    if key in node:
+                        keep[key] = node[key]
+                if isinstance(keep.get("properties"), dict):
+                    keep["properties"] = {
+                        str(name): compact_node(value)
+                        for name, value in keep["properties"].items()
+                        if isinstance(value, dict)
+                    }
+                if isinstance(keep.get("items"), dict):
+                    keep["items"] = compact_node(keep["items"])
+                for key in ("anyOf", "oneOf"):
+                    if isinstance(keep.get(key), list):
+                        keep[key] = [compact_node(item) for item in keep[key] if isinstance(item, dict)]
+                return keep
+            fn["parameters"] = compact_node(params)
+    return compact
+
+
+def _prepare_tool_schemas(schemas):
+    return [_compact_tool_schema(schema) for schema in schemas[:4]]
+
 
 def _execute_tool(name, args):
     try:
@@ -202,8 +241,16 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
     task_plan = plan_task(goal)
     execution_plan = build_execution_plan(task_plan)
     client = Groq(api_key=api_key)
-    messages = build_messages(goal, session_id, rag_sources=rag_sources, memory_enabled=memory_enabled)
-    tool_schemas = _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    tool_schemas = _prepare_tool_schemas(
+        _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    )
+    messages = build_messages(
+        goal,
+        session_id,
+        rag_sources=rag_sources,
+        memory_enabled=memory_enabled,
+        tool_budget=bool(tool_schemas),
+    )
     # A dynamically discovered MCP tool makes an otherwise "simple" task
     # tool-bearing. Give the execution loop enough room for tool -> result ->
     # final-answer, without changing the static planner.
@@ -296,8 +343,16 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
     task_plan = plan_task(goal)
     execution_plan = build_execution_plan(task_plan)
     client = Groq(api_key=api_key)
-    messages = build_messages(goal, session_id, rag_sources=rag_sources, memory_enabled=memory_enabled)
-    tool_schemas = _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    tool_schemas = _prepare_tool_schemas(
+        _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    )
+    messages = build_messages(
+        goal,
+        session_id,
+        rag_sources=rag_sources,
+        memory_enabled=memory_enabled,
+        tool_budget=bool(tool_schemas),
+    )
     # A dynamically discovered MCP tool makes an otherwise "simple" task
     # tool-bearing. Give the execution loop enough room for tool -> result ->
     # final-answer, without changing the static planner.
