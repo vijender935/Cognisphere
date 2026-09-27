@@ -31,8 +31,10 @@ def _is_private_or_local(host: str, resolve_dns: bool = True) -> bool:
         if not resolve_dns:
             return False
         try:
-            infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            infos = socket.getaddrinfo(host, None)
         except socket.gaierror as exc:
+            if os.getenv("ALLOW_LOCAL_MCP", "0") == "1":
+                return False
             raise ValueError("Connector host could not be resolved.") from exc
         for info in infos:
             try:
@@ -57,9 +59,10 @@ def validate_connector_url(url: str, *, resolve_dns: bool = True) -> str:
         raise ValueError("Connector URL must be a valid http(s) URL.")
     if parsed.username or parsed.password:
         raise ValueError("Connector URL must not contain embedded credentials.")
-    if parsed.scheme == "http" and os.getenv("ALLOW_LOCAL_MCP", "0") != "1":
+    allow_local = os.getenv("ALLOW_LOCAL_MCP", "0") == "1"
+    if parsed.scheme == "http" and not allow_local:
         raise ValueError("HTTP MCP connectors are disabled; use HTTPS.")
-    if _is_private_or_local(parsed.hostname, resolve_dns=resolve_dns) and os.getenv("ALLOW_LOCAL_MCP", "0") != "1":
+    if _is_private_or_local(parsed.hostname, resolve_dns=resolve_dns) and not allow_local:
         raise ValueError("Connector host resolves to a private or local address.")
     try:
         port = parsed.port
@@ -81,10 +84,6 @@ def _decode_status(value):
 
 
 # --- Header encryption at rest -------------------------------------------------
-# If MCP_HEADER_ENCRYPTION_KEY is set, connector headers (which can contain
-# bearer tokens / API keys) are encrypted before being written to the
-# database. Without the key, headers fall back to plaintext storage so
-# existing local/dev setups keep working without breaking.
 _FERNET = None
 
 
@@ -158,6 +157,13 @@ def init_connectors_db():
             con.execute("DROP INDEX IF EXISTS mcp_connectors_user_id_name_key")
             con.execute("ALTER TABLE mcp_connectors DROP COLUMN IF EXISTS user_id")
         _LEGACY_MIGRATED = True
+
+
+def _migrate_legacy_schema():
+    """Remove legacy user-scoping from an existing PostgreSQL database."""
+    with connect() as con:
+        con.execute("DROP INDEX IF EXISTS mcp_connectors_user_id_name_key")
+        con.execute("ALTER TABLE mcp_connectors DROP COLUMN IF EXISTS user_id")
 
 
 def list_connectors(*, redact_headers=False):
