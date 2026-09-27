@@ -128,66 +128,105 @@ def recovery_instruction(tool_name: str, result: ToolResult) -> str:
     )
 
 
+def _tokenize(text: str) -> set[str]:
+    """Normalize arbitrary tool metadata and user text into comparable terms."""
+    import re
+
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\\1 \\2", str(text or ""))
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", expanded.lower())
+        if len(token) >= 3
+    }
+
+
+def _tool_metadata(schema: dict) -> tuple[str, str, str]:
+    fn = schema.get("function", {}) if isinstance(schema, dict) else {}
+    name = str(fn.get("name", ""))
+    # Do not let the generated MCP server prefix dominate routing decisions.
+    tool_name = name.removeprefix("mcp__")
+    if "__" in tool_name:
+        _, tool_name = tool_name.split("__", 1)
+
+    description = str(fn.get("description", ""))
+    parameters = fn.get("parameters") or {}
+    properties = parameters.get("properties") if isinstance(parameters, dict) else {}
+    metadata_parts = [tool_name, description]
+    if isinstance(properties, dict):
+        for key, value in properties.items():
+            metadata_parts.append(str(key))
+            if isinstance(value, dict):
+                metadata_parts.append(str(value.get("title", "")))
+                metadata_parts.append(str(value.get("description", "")))
+                metadata_parts.extend(str(item) for item in (value.get("enum") or []) if item is not None)
+    return tool_name, " ".join(metadata_parts), name
+
+
+def select_relevant_tools(
+    schemas: list[dict],
+    goal: str,
+    max_tools: int = 8,
+) -> list[dict]:
+    """Select tools from their advertised metadata without server-specific rules.
+
+    Relevance is derived only from the current user request and each tool's
+    name, description, and input metadata. A zero-score catalog is not exposed
+    to the model: unrelated tools must not be offered merely because they exist.
+    """
+    if max_tools < 1:
+        return []
+
+    goal_terms = _tokenize(goal)
+    if not goal_terms:
+        return []
+
+    scored = []
+    for schema in schemas:
+        tool_name, metadata, display_name = _tool_metadata(schema)
+        metadata_terms = _tokenize(metadata)
+        name_terms = _tokenize(tool_name)
+        description_terms = _tokenize(metadata) - name_terms
+
+        exact_name = goal_terms & name_terms
+        exact_description = goal_terms & description_terms
+        exact_metadata = goal_terms & metadata_terms
+
+        # Name and description carry more weight than generic parameter names.
+        score = (len(exact_name) * 8) + (len(exact_description) * 4)
+        score += len(exact_metadata - exact_name - exact_description) * 2
+
+        # Phrase overlap helps with natural-language requests such as
+        # "process images from drive" without maintaining a synonym dictionary.
+        goal_text = " ".join(sorted(goal_terms))
+        metadata_text = " ".join(sorted(metadata_terms))
+        if goal_text and goal_text in metadata.lower():
+            score += 6
+
+        # Lightweight morphological/fuzzy matching handles variants such as
+        # process/processing and image/images without hardcoded aliases.
+        for term in goal_terms:
+            if len(term) < 5:
+                continue
+            for candidate in metadata_terms:
+                if candidate == term:
+                    continue
+                if candidate.startswith(term) or term.startswith(candidate):
+                    score += 1
+                    break
+
+        scored.append((score, display_name.lower(), schema))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in scored if item[0] > 0][:max_tools]
+
+
 def select_mcp_tools(
     schemas: list[dict],
     goal: str,
     max_tools: int = 12,
 ) -> list[dict]:
-    """Select a bounded MCP tool subset using weighted lexical relevance."""
-    if max_tools < 1:
-        return []
-
-    import re
-
-    def terms_for(text: str) -> set[str]:
-        return {
-            token
-            for token in re.findall(r"[a-z0-9_]+", text.lower())
-            if len(token) >= 3
-        }
-
-    terms = terms_for(goal)
-    aliases = {
-        "database": {"db", "sql", "query", "rows", "records", "table", "data"},
-        "db": {"database", "sql", "query", "rows", "records", "table"},
-        "records": {"rows", "items", "data", "list", "search"},
-        "record": {"row", "item", "data"},
-        "table": {"rows", "records", "schema"},
-        "query": {"search", "execute", "sql", "select"},
-    }
-    scored = []
-    for schema in schemas:
-        fn = schema.get("function", {})
-        name = str(fn.get("name", "")).lower()
-        description = str(fn.get("description", "")).lower()
-        parameters = fn.get("parameters") or {}
-        properties = parameters.get("properties") if isinstance(parameters, dict) else {}
-        property_text = " ".join(str(key) for key in properties.keys()) if isinstance(properties, dict) else ""
-
-        name_terms = terms_for(name)
-        description_terms = terms_for(description)
-        property_terms = terms_for(property_text)
-        combined = name_terms | description_terms | property_terms
-
-        score = 0
-        for term in terms:
-            if term in name_terms:
-                score += 6
-            elif term in description_terms:
-                score += 3
-            elif term in property_terms:
-                score += 2
-            for alias in aliases.get(term, set()):
-                if alias in combined:
-                    score += 1
-
-        scored.append((score, name, schema))
-
-    scored.sort(key=lambda item: (-item[0], item[1]))
-    relevant = [item[2] for item in scored if item[0] > 0]
-    if relevant:
-        return relevant[:max_tools]
-    return [item[2] for item in scored[:max_tools]]
+    """Backward-compatible MCP selector using dynamic tool metadata routing."""
+    return select_relevant_tools(schemas, goal, max_tools=max_tools)
 
 def build_execution_plan(plan: TaskPlan) -> ExecutionPlan:
     steps = ["understand_request"]
