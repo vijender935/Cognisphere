@@ -16,7 +16,7 @@ The API is intentionally single-user. There is no registration, login, account d
 
 ## Persistence
 
-Render PostgreSQL is used when DATABASE_URL is present. Local development falls back to SQLite.
+Render PostgreSQL is used when DATABASE_URL is present.
 
 Uploaded files use the configured AGENT_FILE_ROOT. Cloudflare R2 is optional; when configured, uploaded files are mirrored to the bucket.
 
