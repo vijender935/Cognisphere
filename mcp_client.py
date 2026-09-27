@@ -106,29 +106,78 @@ def _server_params(config):
     )
 
 
-def _groq_json_schema(schema):
-    """Normalize MCP JSON Schema to the subset accepted by function calling."""
+def _groq_json_schema(schema, *, nullable=False):
+    """Normalize MCP JSON Schema for Groq tool calling.
+
+    MCP schemas commonly model optional arguments as ordinary primitive types.
+    Some Groq tool-calling models emit null for omitted optional arguments.
+    Groq validates generated arguments against the supplied schema before
+    returning the response, so optional properties must explicitly allow null.
+    """
     if not isinstance(schema, dict):
         return {"type": "object", "properties": {}}
-    allowed = {"type", "properties", "required", "description", "enum", "items", "additionalProperties"}
+
+    allowed = {
+        "type", "properties", "required", "description", "enum",
+        "items", "additionalProperties", "anyOf", "oneOf",
+    }
     out = {key: value for key, value in schema.items() if key in allowed}
-    if out.get("type") != "object":
-        out = {"type": "object", "properties": {}}
-    props = out.get("properties")
-    if not isinstance(props, dict):
-        out["properties"] = {}
+
+    schema_type = out.get("type")
+    if isinstance(schema_type, list):
+        types = [str(item) for item in schema_type if item]
+        if nullable and "null" not in types:
+            types.append("null")
+        out["type"] = list(dict.fromkeys(types))
+    elif isinstance(schema_type, str):
+        if nullable and schema_type != "null":
+            out["type"] = [schema_type, "null"]
+    elif "anyOf" in out or "oneOf" in out:
+        variants_key = "anyOf" if isinstance(out.get("anyOf"), list) else "oneOf"
+        variants = out.get(variants_key) or []
+        out[variants_key] = [
+            _groq_json_schema(item, nullable=False) if isinstance(item, dict) else item
+            for item in variants
+        ]
+        if nullable and not any(
+            isinstance(item, dict) and item.get("type") == "null"
+            for item in out[variants_key]
+        ):
+            out[variants_key].append({"type": "null"})
     else:
-        out["properties"] = {
-            str(name): _groq_json_schema(value) if isinstance(value, dict) and value.get("type") == "object"
-            else {key: value for key, value in value.items() if key in allowed} if isinstance(value, dict)
-            else {"type": "string"}
-            for name, value in props.items()
-        }
-    required = out.get("required")
-    if isinstance(required, list):
-        out["required"] = [str(x) for x in required if str(x) in out["properties"]]
-    else:
-        out.pop("required", None)
+        out["type"] = "object"
+
+    if out.get("type") == "object":
+        props = out.get("properties")
+        if not isinstance(props, dict):
+            out["properties"] = {}
+        else:
+            required = {
+                str(item) for item in (out.get("required") or [])
+                if item is not None
+            }
+            normalized_props = {}
+            for name, value in props.items():
+                property_name = str(name)
+                normalized_props[property_name] = _groq_json_schema(
+                    value if isinstance(value, dict) else {"type": "string"},
+                    nullable=property_name not in required,
+                )
+            out["properties"] = normalized_props
+
+        required = out.get("required")
+        if isinstance(required, list):
+            out["required"] = [
+                str(item) for item in required
+                if str(item) in out["properties"]
+            ]
+        else:
+            out.pop("required", None)
+
+    items = out.get("items")
+    if isinstance(items, dict):
+        out["items"] = _groq_json_schema(items, nullable=False)
+
     return out
 
 
