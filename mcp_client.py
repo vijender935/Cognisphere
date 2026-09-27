@@ -256,7 +256,7 @@ def discover_tool_schemas():
     # tools/list (for example a global rate limit). The agent can still execute
     # a previously discovered tool through _call_group_tool(), which no longer
     # performs a second tools/list request.
-    if diagnostics:
+    if diagnostics and _DISCOVERY_CACHE.get("key") == key:
         stale = list(_DISCOVERY_CACHE.get("schemas", []))
         if stale:
             failed_servers = {str(item.get("name", "")) for item in diagnostics}
