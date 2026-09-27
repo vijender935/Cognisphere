@@ -20,6 +20,9 @@ from mcp.client.session_group import (
     SseServerParameters,
     StreamableHttpParameters,
 )
+import httpx2
+from mcp.client.streamable_http import streamable_http_client
+from mcp.client.sse import sse_client
 from mcp_registry import load_server_configs, tool_allowed
 
 logger = logging.getLogger(__name__)
@@ -240,11 +243,51 @@ def discover_tool_schemas():
     if _DISCOVERY_CACHE["key"] == key and now < _DISCOVERY_CACHE["expires_at"]:
         return list(_DISCOVERY_CACHE["schemas"])
 
+    configs = load_server_configs()
     schemas, diagnostics = asyncio.run(
-        asyncio.wait_for(_discover_group(load_server_configs()), timeout=_timeout_seconds() * max(1, len(load_server_configs())))
+        asyncio.wait_for(
+            _discover_group(configs),
+            timeout=_timeout_seconds() * max(1, len(configs)),
+        )
     )
     _LAST_DIAGNOSTICS[:] = diagnostics
-    _DISCOVERY_CACHE.update(key=key, expires_at=now + ttl, schemas=schemas)
+
+    # Keep the last known-good tool catalog when a server temporarily rejects
+    # tools/list (for example a global rate limit). The agent can still execute
+    # a previously discovered tool through _call_group_tool(), which no longer
+    # performs a second tools/list request.
+    if diagnostics:
+        stale = list(_DISCOVERY_CACHE.get("schemas", []))
+        if stale:
+            failed_servers = {str(item.get("name", "")) for item in diagnostics}
+            fresh_servers = {
+                str(schema.get("function", {}).get("name", "")).removeprefix("mcp__").split("__", 1)[0]
+                for schema in schemas
+            }
+            merged = list(schemas)
+            existing_names = {
+                schema.get("function", {}).get("name")
+                for schema in merged
+            }
+            for schema in stale:
+                full_name = str(schema.get("function", {}).get("name", ""))
+                server = full_name.removeprefix("mcp__").split("__", 1)[0]
+                if server in failed_servers and server not in fresh_servers and full_name not in existing_names:
+                    merged.append(schema)
+            schemas = merged
+            logger.warning(
+                "MCP discovery partially failed; using cached schemas for servers: %s",
+                sorted(failed_servers),
+            )
+
+    # Only replace the cache with a genuinely usable catalog. This prevents a
+    # transient discovery/rate-limit failure from poisoning the 60-second cache
+    # with an empty tool list.
+    if schemas or not diagnostics:
+        _DISCOVERY_CACHE.update(key=key, expires_at=now + ttl, schemas=list(schemas))
+    elif _DISCOVERY_CACHE.get("key") != key:
+        _DISCOVERY_CACHE.update(key=key, expires_at=now + ttl, schemas=list(schemas))
+
     return list(schemas)
 
 
@@ -263,6 +306,13 @@ def _content_to_text(result):
 
 
 async def _call_group_tool(name, arguments):
+    """Call one MCP tool without doing a fresh tools/list discovery.
+
+    ClientSessionGroup.connect_to_server() performs tool discovery for the
+    connected server. That is useful for aggregation, but it is unnecessary
+    for an already-selected tool and can trigger server-side rate limits on
+    every execution. The v2 Client can call a known tool directly.
+    """
     if not name.startswith("mcp__"):
         raise ValueError("Not an MCP tool.")
     qualified = name[len("mcp__") :]
@@ -276,17 +326,41 @@ async def _call_group_tool(name, arguments):
     if not tool_allowed(config, original_tool_name):
         raise PermissionError(f"MCP tool {original_tool_name!r} is not allowed for server {config.name!r}.")
 
-    async with ClientSessionGroup(component_name_hook=_component_name) as group:
-        token = _CURRENT_SERVER_NAME.set(config.name)
-        try:
-            await group.connect_to_server(_server_params(config))
-        finally:
-            _CURRENT_SERVER_NAME.reset(token)
-        group_name = f"{_safe_tool_component(config.name)}__{_safe_tool_component(original_tool_name)}"
-        if group_name not in group.tools:
-            raise ValueError(f"MCP tool {original_tool_name!r} is not available on server {config.name!r}.")
-        result = await group.call_tool(group_name, arguments or {}, read_timeout_seconds=_timeout_seconds())
-        return _content_to_text(result)
+    timeout = _timeout_seconds()
+    if config.transport == "streamable-http":
+        http_timeout = httpx2.Timeout(timeout, read=max(timeout, 300.0))
+        async with httpx2.AsyncClient(
+            headers=config.headers or {},
+            timeout=http_timeout,
+        ) as http_client:
+            transport = streamable_http_client(
+                config.url,
+                http_client=http_client,
+                terminate_on_close=True,
+            )
+            async with Client(transport) as client:
+                result = await client.call_tool(
+                    original_tool_name,
+                    arguments or {},
+                    read_timeout_seconds=timeout,
+                )
+    elif config.transport == "sse":
+        transport = sse_client(
+            config.url,
+            headers=config.headers or {},
+            timeout=timeout,
+            sse_read_timeout=max(timeout, 300.0),
+        )
+        async with Client(transport) as client:
+            result = await client.call_tool(
+                original_tool_name,
+                arguments or {},
+                read_timeout_seconds=timeout,
+            )
+    else:
+        raise ValueError(f"Unsupported MCP transport: {config.transport}")
+
+    return _content_to_text(result)
 
 
 def call_tool(name, arguments):
