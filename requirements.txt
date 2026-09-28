@@ -15,4 +15,3 @@ psycopg[binary]
 boto3
 httpx2
 cryptography
-celery[redis]
