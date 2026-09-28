@@ -16,8 +16,8 @@ from multimodal import save_upload,image_data_url,ensure_local_file,delete_uploa
 from mcp_registry import registry_snapshot
 from connectors import init_connectors_db,list_connectors,upsert_connector,delete_connector,update_connector_status
 from preferences import init_preferences_db,get_preferences,update_preferences
-from jobs import init_jobs_db,create_job,get_job,list_jobs,mark_failed,set_celery_task_id
-from task_queue import enqueue_chat_job
+from jobs import init_jobs_db,create_job,get_job,list_jobs,mark_failed
+from task_queue import enqueue_chat_job,recover_pending_jobs,active_job_count
 from document_parser import extract_and_limit,is_supported_document
 from auth import SESSION_COOKIE,SESSION_DAYS,init_auth_db,account_exists,setup_account,login as auth_login,get_account_for_session,logout as auth_logout,update_account,change_password
 logger=logging.getLogger(__name__)
@@ -36,7 +36,7 @@ def _check_chat_rate_limit(key):
 
 ensure_directories()
 if not os.getenv("DATABASE_URL","").strip(): raise RuntimeError("DATABASE_URL is required.")
-init_db(); init_jobs_db(); init_semantic_store(); init_connectors_db(); init_preferences_db(); init_auth_db()
+init_db(); init_jobs_db(); init_semantic_store(); init_connectors_db(); init_preferences_db(); init_auth_db(); recover_pending_jobs()
 
 app=FastAPI(title="Personal AI Assistant API",version="1.0.0",description="REST API for a single-user personal AI assistant.")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000,http://localhost:5173").split(",") if x.strip()]
@@ -88,7 +88,7 @@ class RAGDocumentRequest(BaseModel):
     source:str=Field(...,min_length=1,max_length=500); content:str=Field(...,min_length=1,max_length=200000)
 
 @app.get("/health")
-def health(): return {"status":"ok","service":"personal-ai-assistant","model":MODEL,"shell_enabled":ALLOW_SHELL,"database":"postgresql","persistent_database":True,"background_jobs":bool(os.getenv("CELERY_BROKER_URL"))}
+def health(): return {"status":"ok","service":"personal-ai-assistant","model":MODEL,"shell_enabled":ALLOW_SHELL,"database":"postgresql","persistent_database":True,"background_jobs":True,"active_background_jobs":active_job_count()}
 @app.get("/api/v1/info")
 def info(): return {"name":"Personal AI Assistant","version":"1.0.0","model":MODEL,"shell_enabled":ALLOW_SHELL,"mode":"single-user"}
 
@@ -290,15 +290,9 @@ def create_chat_job(request:ChatRequest,raw_request:Request):
     if not os.getenv("GROQ_API_KEY"):
         raise HTTPException(status_code=503,detail="GROQ_API_KEY is not configured.")
 
-    # Web and worker services have separate filesystems on Render. R2 is the
-    # shared file layer for attachment-backed jobs.
+    # The free-tier runner executes in this same web service, so local
+    # attachments are directly available while the process remains alive.
     if request.attachment_paths:
-        from multimodal import r2_enabled
-        if not r2_enabled():
-            raise HTTPException(
-                status_code=503,
-                detail="Background jobs with attachments require Cloudflare R2.",
-            )
         for path in request.attachment_paths:
             try:
                 ensure_local_file(path)
@@ -316,23 +310,24 @@ def create_chat_job(request:ChatRequest,raw_request:Request):
         },
     )
     try:
-        task = enqueue_chat_job(job["id"])
-        set_celery_task_id(job["id"],task.id)
+        enqueue_chat_job(job["id"])
     except Exception as exc:
         mark_failed(job["id"],str(exc))
-        raise HTTPException(status_code=503,detail="Background worker queue is unavailable.") from exc
+        raise HTTPException(status_code=503,detail="Could not start background job.") from exc
 
     return _public_job(get_job(job["id"]))
 
 
 @app.get("/api/v1/jobs",response_model=list[JobResponse])
 def get_jobs(status:str|None=None,limit:int=50):
+    recover_pending_jobs()
     statuses=[x.strip() for x in status.split(",")] if status else None
     return [_public_job(job) for job in list_jobs(statuses=statuses,limit=limit)]
 
 
 @app.get("/api/v1/jobs/{job_id}",response_model=JobResponse)
 def get_job_status(job_id:str):
+    recover_pending_jobs()
     job=get_job(job_id)
     if not job:
         raise HTTPException(status_code=404,detail="Job not found.")
