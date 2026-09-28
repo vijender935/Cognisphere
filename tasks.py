@@ -7,8 +7,9 @@ import os
 from celery import Task
 
 from agent import run_agent
-from document_parser import extract_and_limit, is_supported_document
+from document_parser import is_supported_document
 from multimodal import image_data_url, r2_enabled, ensure_local_file
+from config import FILE_ROOT
 from jobs import get_job, mark_completed, mark_failed, mark_progress, mark_retrying, mark_running
 from task_queue import celery_app
 
@@ -68,7 +69,7 @@ def run_chat_job(self, job_id: str):
         candidate = ensure_local_file(path)
         if not is_supported_document(candidate):
             raise ValueError(f"Unsupported attachment: {path}")
-        rag_sources.append(str(candidate))
+        rag_sources.append(str(candidate.relative_to(FILE_ROOT.resolve())))
 
     mark_progress(job_id, 35, "Running assistant")
     answer = run_agent(
