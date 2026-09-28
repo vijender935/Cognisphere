@@ -8,7 +8,6 @@ export function getEditableLastUser(messages){if(!messages?.length||messages.len
 const ACTIVE_JOB_STATUSES=new Set(["queued","running","retrying"]);
 
 export default function useChat({API,chats,setChats,active,setActive,text,setText,attachments,setAttachments,loading,setLoading,notify,webSearch,memory,authenticated}){
- const [streamController,setStreamController]=useState(null);
  const sendingRef=useRef(false);
  const pollingRef=useRef(new Map());
  const mountedRef=useRef(true);
@@ -26,15 +25,6 @@ export default function useChat({API,chats,setChats,active,setActive,text,setTex
  function update(messages){
    const normalized=normalizeMessages(messages);
    setChats(cs=>cs.map(c=>c.id===active?{
-     ...c,
-     messages:normalized,
-     title:c.title==="New conversation"?(normalized.find(m=>m.role==="user")?.content||"New conversation").slice(0,32):c.title
-   }:c));
- }
-
- function updateSession(sessionId,messages){
-   const normalized=normalizeMessages(messages);
-   setChats(cs=>cs.map(c=>c.id===sessionId?{
      ...c,
      messages:normalized,
      title:c.title==="New conversation"?(normalized.find(m=>m.role==="user")?.content||"New conversation").slice(0,32):c.title
@@ -92,7 +82,6 @@ export default function useChat({API,chats,setChats,active,setActive,text,setTex
            if(job.status==="completed"||job.status==="failed"){
              if(job.session_id===active)setLoading(false);
              sendingRef.current=false;
-             setStreamController(null);
            }
            return;
          }
@@ -182,7 +171,6 @@ export default function useChat({API,chats,setChats,active,setActive,text,setTex
  function stopStream(){
    if(!sendingRef.current)return;
    sendingRef.current=false;
-   setStreamController(null);
    setLoading(false);
    notify("UI polling stopped. The background job continues on the server.","success");
  }
