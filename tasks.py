@@ -7,6 +7,8 @@ import os
 from celery import Task
 
 from agent import run_agent
+from document_parser import extract_and_limit, is_supported_document
+from multimodal import image_data_url, r2_enabled, ensure_local_file
 from jobs import get_job, mark_completed, mark_failed, mark_progress, mark_retrying, mark_running
 from task_queue import celery_app
 
@@ -51,11 +53,29 @@ def run_chat_job(self, job_id: str):
     payload = job["payload"]
     mark_progress(job_id, 10, "Preparing assistant task")
 
+    image_urls = []
+    rag_sources = list(payload.get("rag_sources") or [])
+    for path in payload.get("attachment_paths") or []:
+        try:
+            image_urls.append(image_data_url(path))
+            continue
+        except ValueError:
+            pass
+        if not r2_enabled():
+            raise RuntimeError(
+                "Background jobs with file attachments require Cloudflare R2 so the worker can access uploads."
+            )
+        candidate = ensure_local_file(path)
+        if not is_supported_document(candidate):
+            raise ValueError(f"Unsupported attachment: {path}")
+        rag_sources.append(str(candidate))
+
+    mark_progress(job_id, 35, "Running assistant")
     answer = run_agent(
         payload["message"],
         session_id=payload["session_id"],
-        image_urls=None,
-        rag_sources=payload.get("rag_sources") or None,
+        image_urls=image_urls or None,
+        rag_sources=rag_sources or None,
         memory_enabled=bool(payload.get("memory", True)),
         web_search_enabled=bool(payload.get("web_search", True)),
         verbose=False,
