@@ -1,36 +1,60 @@
-"""Celery queue configuration for durable background jobs."""
+"""Free-tier in-process job runner.
+
+Jobs are durable in PostgreSQL, while execution happens inside the existing
+Render Free web service. No paid Background Worker or Redis/Key Value broker
+is required.
+
+Important limitation: Render Free web services can restart or spin down after
+15 minutes without inbound traffic, so this runner cannot guarantee execution
+through a platform restart. Pending jobs remain in PostgreSQL and are recovered
+when the service receives another request.
+"""
 from __future__ import annotations
 
-import os
+import logging
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 
-from celery import Celery
+from jobs import list_jobs
 
+logger = logging.getLogger(__name__)
 
-BROKER_URL = os.getenv("CELERY_BROKER_URL", "").strip()
-
-# A memory broker keeps imports/tests usable when the queue is not configured.
-# Production enqueueing is explicitly blocked unless CELERY_BROKER_URL exists.
-celery_app = Celery("personal_ai_assistant", broker=BROKER_URL or "memory://")
-
-celery_app.conf.update(
-    task_serializer="json",
-    accept_content=["json"],
-    result_serializer="json",
-    task_track_started=True,
-    task_acks_late=True,
-    worker_prefetch_multiplier=1,
-    task_reject_on_worker_lost=True,
-    broker_transport_options={"visibility_timeout": 21600},
-    result_backend_transport_options={"visibility_timeout": 21600},
-    visibility_timeout=21600,
-    task_default_queue="personal-ai-assistant",
-)
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="assistant-job")
+_futures: dict[str, Future] = {}
+_lock = threading.Lock()
 
 
-def enqueue_chat_job(job_id: str):
-    if not BROKER_URL:
-        raise RuntimeError("CELERY_BROKER_URL is not configured.")
-    # Import here so API startup does not depend on task registration order.
+def _run(job_id: str) -> None:
     from tasks import run_chat_job
 
-    return run_chat_job.apply_async(args=[job_id], task_id=job_id)
+    try:
+        run_chat_job(job_id)
+    except Exception:
+        logger.exception("Background job failed: %s", job_id)
+    finally:
+        with _lock:
+            _futures.pop(job_id, None)
+
+
+def enqueue_chat_job(job_id: str) -> Future:
+    """Queue a chat job on the single in-process worker."""
+    with _lock:
+        existing = _futures.get(job_id)
+        if existing and not existing.done():
+            return existing
+        future = _executor.submit(_run, job_id)
+        _futures[job_id] = future
+        return future
+
+
+def recover_pending_jobs() -> int:
+    """Re-submit durable jobs that are not terminal after a process restart."""
+    jobs = list_jobs(statuses=["queued", "retrying"], limit=100)
+    for job in jobs:
+        enqueue_chat_job(job["id"])
+    return len(jobs)
+
+
+def active_job_count() -> int:
+    with _lock:
+        return sum(not f.done() for f in _futures.values())
