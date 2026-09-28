@@ -1,7 +1,7 @@
 """FastAPI REST API for the single-user Personal AI Assistant."""
 from __future__ import annotations
 import json,logging,os,time
-from typing import Optional
+from typing import Optional,Any
 from fastapi import FastAPI,File,HTTPException,UploadFile,Request
 from fastapi.responses import FileResponse,StreamingResponse,HTMLResponse,JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -69,7 +69,8 @@ class ChatResponse(BaseModel):
 class JobResponse(BaseModel):
     id:str; type:str; status:str; progress:int; message:Optional[str]=None
     result:Optional[str]=None; error:Optional[str]=None; session_id:Optional[str]=None
-    attempts:int=0
+    user_message:Optional[str]=None; attempts:int=0
+    created_at:Any=None; started_at:Any=None; completed_at:Any=None; updated_at:Any=None
 class MemoryRequest(BaseModel):
     fact:str=Field(...,min_length=1,max_length=5000); source:str=Field(default="api",max_length=100)
 class PreferencesRequest(BaseModel):
@@ -274,6 +275,7 @@ def _public_job(job):
         "result": job["result"] if job["status"] == "completed" else None,
         "error": job["error"] if job["status"] == "failed" else None,
         "session_id": payload.get("session_id"),
+        "user_message": payload.get("message"),
         "attempts": job["attempts"],
         "created_at": job["created_at"],
         "started_at": job["started_at"],
