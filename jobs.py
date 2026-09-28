@@ -156,3 +156,24 @@ def mark_failed(job_id: str, error: str) -> None:
                WHERE id=?""",
             (error[:4000], job_id),
         )
+
+
+def list_jobs(statuses: list[str] | None = None, limit: int = 50) -> list[dict]:
+    limit = max(1, min(int(limit), 100))
+    clauses = []
+    params = []
+    if statuses:
+        valid = [x for x in statuses if x in JOB_STATUSES]
+        if valid:
+            placeholders = ",".join("?" for _ in valid)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(valid)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    with connect() as con:
+        rows = con.execute(
+            f"""SELECT id,type,status,payload,progress,message,result,error,
+                       celery_task_id,attempts,created_at,started_at,completed_at,updated_at
+                FROM jobs{where} ORDER BY created_at DESC LIMIT ?""",
+            (*params, limit),
+        ).fetchall()
+    return [_decode(row) for row in rows]
