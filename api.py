@@ -88,7 +88,7 @@ class RAGDocumentRequest(BaseModel):
     source:str=Field(...,min_length=1,max_length=500); content:str=Field(...,min_length=1,max_length=200000)
 
 @app.get("/health")
-def health(): return {"status":"ok","service":"personal-ai-assistant","model":MODEL,"shell_enabled":ALLOW_SHELL,"database":"postgresql","persistent_database":True}
+def health(): return {"status":"ok","service":"personal-ai-assistant","model":MODEL,"shell_enabled":ALLOW_SHELL,"database":"postgresql","persistent_database":True,"background_jobs":bool(os.getenv("CELERY_BROKER_URL"))}
 @app.get("/api/v1/info")
 def info(): return {"name":"Personal AI Assistant","version":"1.0.0","model":MODEL,"shell_enabled":ALLOW_SHELL,"mode":"single-user"}
 
