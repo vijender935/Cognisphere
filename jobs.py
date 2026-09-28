@@ -1,7 +1,7 @@
 """Persistent job state stored in PostgreSQL.
 
-The queue itself is Celery/Render Key Value; PostgreSQL is the durable source
-of truth for job status and results so the API can recover after restarts.
+PostgreSQL is the durable source of truth for job status and results. The
+free-tier runner executes jobs in the existing FastAPI process.
 """
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ def init_jobs_db() -> None:
                 message TEXT,
                 result TEXT,
                 error TEXT,
-                celery_task_id TEXT,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 started_at TIMESTAMP,
@@ -51,7 +50,6 @@ def _decode(row):
         message,
         result,
         error,
-        celery_task_id,
         attempts,
         created_at,
         started_at,
@@ -67,7 +65,6 @@ def _decode(row):
         "message": message,
         "result": result,
         "error": error,
-        "celery_task_id": celery_task_id,
         "attempts": int(attempts or 0),
         "created_at": created_at,
         "started_at": started_at,
@@ -91,18 +88,21 @@ def get_job(job_id: str) -> dict | None:
     with connect() as con:
         row = con.execute(
             """SELECT id,type,status,payload,progress,message,result,error,
-                      celery_task_id,attempts,created_at,started_at,completed_at,updated_at
+                      attempts,created_at,started_at,completed_at,updated_at
                FROM jobs WHERE id=?""",
             (job_id,),
         ).fetchone()
     return _decode(row)
 
 
-def set_celery_task_id(job_id: str, task_id: str) -> None:
+
+def requeue_interrupted_jobs() -> None:
+    """Return non-terminal jobs to the queue after a process restart."""
     with connect() as con:
         con.execute(
-            "UPDATE jobs SET celery_task_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (task_id, job_id),
+            """UPDATE jobs SET status='queued',message='Recovered after service restart',
+                      updated_at=CURRENT_TIMESTAMP
+               WHERE status IN ('running', 'retrying')"""
         )
 
 
