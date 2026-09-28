@@ -12,7 +12,7 @@ This repository is intentionally designed for one personal instance, not as a mu
 - Retry handling for transient model failures.
 - Tool-aware agent loop with execution limits and recovery.
 - Streaming responses through Server-Sent Events for interactive requests.
-- Durable background chat jobs through Celery + Render Key Value + a dedicated worker; jobs continue if the browser disconnects.
+- Durable chat job state in PostgreSQL with a lightweight in-process runner; the browser can disconnect without cancelling an active task.
 - Regenerate the latest answer.
 - Edit and resend a user message.
 - Multiple local chat sessions with titles, rename, delete, and clear-history controls.
@@ -83,7 +83,7 @@ This repository is intentionally designed for one personal instance, not as a mu
 
 ## Architecture
 
-Interactive requests can still use the normal FastAPI/SSE path. Long-running chat work uses a durable job path:
+Interactive requests can still use the normal FastAPI/SSE path. Long-running chat work uses a free-tier job path:
 
 ~~~
 React / Vite
@@ -91,29 +91,24 @@ React / Vite
      | POST job (fast 202 response)
      v
 FastAPI Web Service
-     |                 |
-     |                 +--> PostgreSQL (durable job state/results)
-     v
-Render Key Value / Redis-compatible broker
      |
-     v
-Celery Background Worker
+     +--> PostgreSQL (durable job state/results)
      |
-     v
-Agent runtime
-  |      |       |
-  |      |       +--> Groq / vision model
-  |      |
-  |      +----------> Memory + RAG
-  |
-  +-----------------> Local tools + MCP
-                         |
-                         +--> configured servers
-                         +--> OAuth
-
-File attachments for background jobs use Cloudflare R2 as the shared file layer
-because Render web and worker services have separate filesystems.
+     +--> In-process job runner (1 concurrent job)
+              |
+              v
+          Agent runtime
+          |      |       |
+          |      |       +--> Groq / vision model
+          |      |
+          |      +----------> Memory + RAG
+          |
+          +-----------------> Local tools + MCP
 ~~~
+
+The PostgreSQL row is the durable source of truth. On process startup, queued/retrying jobs are recovered and submitted again. The runner uses the same Render Free web-service process, so no paid Background Worker or Redis/Key Value broker is required.
+
+**Free-tier limitation:** Render Free web services can restart and can spin down after 15 minutes without inbound traffic. Therefore the PostgreSQL job record is durable, but execution is not guaranteed through a platform restart/spindown.
 
 ## Single-user data model
 
@@ -140,9 +135,8 @@ Legacy user_id columns are removed by initialization/migration paths where appli
 - multimodal.py — uploads, local file access and optional R2.
 - api.py — FastAPI REST/SSE API and durable job endpoints.
 - jobs.py — PostgreSQL-backed job state and results.
-- task_queue.py — Celery/Render Key Value queue configuration.
-- tasks.py — background task implementations and retry policy.
-- worker.py — Render Background Worker entrypoint.
+- task_queue.py — free in-process job executor and pending-job recovery.
+- tasks.py — background chat execution and bounded retry policy.
 - connectors.py — MCP connector storage and validation.
 - mcp_registry.py — environment and connector MCP registry.
 - mcp_client.py — MCP discovery and execution.
@@ -183,7 +177,7 @@ cd frontend && npm test && npm run build
 
 ## Important configuration
 
-GROQ_API_KEY, GROQ_MODEL, GROQ_VISION_MODEL, MAX_ITERATIONS, MAX_RETRIES, MAX_HISTORY_MESSAGES, MAX_CONTEXT_HISTORY, MAX_CONTEXT_CHARS, AGENT_DATA_DIR, AGENT_FILE_ROOT, DATABASE_URL, CELERY_BROKER_URL, JOB_MAX_RETRIES, ALLOW_SHELL, ALLOWED_SHELL_COMMANDS, SHELL_TIMEOUT, CORS_ORIGINS, MCP_SERVERS, MCP_ALLOWED_SERVERS, MCP_TIMEOUT_SECONDS, MCP_DISCOVERY_TTL_SECONDS, PUBLIC_BASE_URL, R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY are supported.
+GROQ_API_KEY, GROQ_MODEL, GROQ_VISION_MODEL, MAX_ITERATIONS, MAX_RETRIES, MAX_HISTORY_MESSAGES, MAX_CONTEXT_HISTORY, MAX_CONTEXT_CHARS, AGENT_DATA_DIR, AGENT_FILE_ROOT, DATABASE_URL, JOB_MAX_RETRIES, ALLOW_SHELL, ALLOWED_SHELL_COMMANDS, SHELL_TIMEOUT, CORS_ORIGINS, MCP_SERVERS, MCP_ALLOWED_SERVERS, MCP_TIMEOUT_SECONDS, MCP_DISCOVERY_TTL_SECONDS, PUBLIC_BASE_URL, R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY are supported.
 
 ## MCP example
 
@@ -211,13 +205,13 @@ MCP discovery reads all available tool pages and filters them through configured
 - Authentication uses an HttpOnly session cookie backed by the persistent database.
 - All application API routes are protected after login.
 - DATABASE_URL is mandatory; the application has no SQLite fallback.
-- CELERY_BROKER_URL is required for durable background jobs in deployed environments.
-- Background jobs are persisted in PostgreSQL and queued through Render Key Value.
-- Background jobs with attachments require R2 so the separate worker can access uploaded files.
+- Background jobs are persisted in PostgreSQL and executed by a single in-process runner on the existing web service.
+- R2 is optional for file persistence; local attachments are available to jobs while the same service process remains alive.
+- A process restart/spindown can interrupt execution; the PostgreSQL job row remains and is recovered on the next service startup/request.
 
 ## Deployment
 
-Render configuration includes the FastAPI web service, a dedicated Celery background worker, a persistent Render Key Value queue, the React/Vite static frontend and PostgreSQL. The worker is a paid compute service and the persistent queue uses a paid Key Value plan; this is required for a durable queue rather than an ephemeral/free cache.
+Render configuration uses only the Free-compatible FastAPI web service, React/Vite static frontend and PostgreSQL. No paid Background Worker or paid Key Value queue is required. Render's Free web service can spin down after 15 minutes without inbound traffic, so this architecture provides durable job state rather than guaranteed always-on execution.
 
 ## Security boundaries
 
