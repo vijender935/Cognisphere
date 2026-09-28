@@ -16,7 +16,7 @@ from multimodal import save_upload,image_data_url,ensure_local_file,delete_uploa
 from mcp_registry import registry_snapshot
 from connectors import init_connectors_db,list_connectors,upsert_connector,delete_connector,update_connector_status
 from preferences import init_preferences_db,get_preferences,update_preferences
-from jobs import init_jobs_db,create_job,get_job,list_jobs,mark_failed
+from jobs import init_jobs_db,create_job,get_job,list_jobs,mark_failed,requeue_interrupted_jobs
 from task_queue import enqueue_chat_job,recover_pending_jobs,active_job_count
 from document_parser import extract_and_limit,is_supported_document
 from auth import SESSION_COOKIE,SESSION_DAYS,init_auth_db,account_exists,setup_account,login as auth_login,get_account_for_session,logout as auth_logout,update_account,change_password
@@ -36,7 +36,7 @@ def _check_chat_rate_limit(key):
 
 ensure_directories()
 if not os.getenv("DATABASE_URL","").strip(): raise RuntimeError("DATABASE_URL is required.")
-init_db(); init_jobs_db(); init_semantic_store(); init_connectors_db(); init_preferences_db(); init_auth_db(); recover_pending_jobs()
+init_db(); init_jobs_db(); requeue_interrupted_jobs(); init_semantic_store(); init_connectors_db(); init_preferences_db(); init_auth_db(); recover_pending_jobs()
 
 app=FastAPI(title="Personal AI Assistant API",version="1.0.0",description="REST API for a single-user personal AI assistant.")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000,http://localhost:5173").split(",") if x.strip()]
