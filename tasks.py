@@ -1,54 +1,26 @@
-"""Celery task definitions for Personal AI Assistant background work."""
+"""Chat job execution for the free-tier in-process runner."""
 from __future__ import annotations
 
 import logging
 import os
-
-from celery import Task
+import time
 
 from agent import run_agent
 from document_parser import is_supported_document
 from multimodal import image_data_url, r2_enabled, ensure_local_file
 from config import FILE_ROOT
 from jobs import get_job, mark_completed, mark_failed, mark_progress, mark_retrying, mark_running
-from task_queue import celery_app
 
 logger = logging.getLogger(__name__)
 
 
-class DurableJobTask(Task):
-    autoretry_for = (Exception,)
-    retry_backoff = True
-    retry_backoff_max = 300
-    retry_jitter = True
-    max_retries = max(0, int(os.getenv("JOB_MAX_RETRIES", "3")))
-    acks_late = True
-    reject_on_worker_lost = True
-
-    def on_retry(self, exc, task_id, args, kwargs, einfo):
-        mark_retrying(task_id, f"Retrying after error: {str(exc)[:300]}")
-
-    def on_failure(self, exc, task_id, args, kwargs, einfo):
-        mark_failed(task_id, str(exc))
-        logger.error("Background job failed: %s: %s", task_id, exc)
-
-    def on_success(self, retval, task_id, args, kwargs):
-        # The task body writes the durable result before Celery acknowledges it.
-        return super().on_success(retval, task_id, args, kwargs)
-
-
-@celery_app.task(
-    bind=True,
-    base=DurableJobTask,
-    name="personal_ai_assistant.run_chat_job",
-)
-def run_chat_job(self, job_id: str):
+def _execute_once(job_id: str) -> str:
     job = get_job(job_id)
     if not job:
         raise ValueError(f"Job {job_id} not found.")
 
     if job["status"] == "completed":
-        return job["result"]
+        return job["result"] or ""
 
     mark_running(job_id)
     payload = job["payload"]
@@ -62,9 +34,10 @@ def run_chat_job(self, job_id: str):
             continue
         except ValueError:
             pass
+
         if not r2_enabled():
             raise RuntimeError(
-                "Background jobs with file attachments require Cloudflare R2 so the worker can access uploads."
+                "Background jobs with file attachments require Cloudflare R2."
             )
         candidate = ensure_local_file(path)
         if not is_supported_document(candidate):
@@ -88,3 +61,25 @@ def run_chat_job(self, job_id: str):
     mark_progress(job_id, 95, "Saving result")
     mark_completed(job_id, answer)
     return answer
+
+
+def run_chat_job(job_id: str) -> str:
+    """Execute a durable job with bounded retries inside this process."""
+    max_retries = max(0, int(os.getenv("JOB_MAX_RETRIES", "3")))
+    delay = 2.0
+
+    for attempt in range(max_retries + 1):
+        try:
+            return _execute_once(job_id)
+        except Exception as exc:
+            if attempt >= max_retries:
+                mark_failed(job_id, str(exc))
+                raise
+            mark_retrying(
+                job_id,
+                f"Retry {attempt + 1}/{max_retries}: {str(exc)[:300]}",
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+
+    raise RuntimeError("Unreachable")
