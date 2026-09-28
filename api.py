@@ -3,7 +3,7 @@ from __future__ import annotations
 import json,logging,os,time
 from typing import Optional
 from fastapi import FastAPI,File,HTTPException,UploadFile,Request
-from fastapi.responses import FileResponse,StreamingResponse,HTMLResponse
+from fastapi.responses import FileResponse,StreamingResponse,HTMLResponse,JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel,Field
@@ -16,6 +16,8 @@ from multimodal import save_upload,image_data_url,ensure_local_file,delete_uploa
 from mcp_registry import registry_snapshot
 from connectors import init_connectors_db,list_connectors,upsert_connector,delete_connector,update_connector_status
 from preferences import init_preferences_db,get_preferences,update_preferences
+from jobs import init_jobs_db,create_job,get_job,list_jobs,mark_failed,set_celery_task_id
+from task_queue import enqueue_chat_job
 from document_parser import extract_and_limit,is_supported_document
 from auth import SESSION_COOKIE,SESSION_DAYS,init_auth_db,account_exists,setup_account,login as auth_login,get_account_for_session,logout as auth_logout,update_account,change_password
 logger=logging.getLogger(__name__)
@@ -34,7 +36,7 @@ def _check_chat_rate_limit(key):
 
 ensure_directories()
 if not os.getenv("DATABASE_URL","").strip(): raise RuntimeError("DATABASE_URL is required.")
-init_db(); init_semantic_store(); init_connectors_db(); init_preferences_db(); init_auth_db()
+init_db(); init_jobs_db(); init_semantic_store(); init_connectors_db(); init_preferences_db(); init_auth_db()
 
 app=FastAPI(title="Personal AI Assistant API",version="1.0.0",description="REST API for a single-user personal AI assistant.")
 origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000,http://localhost:5173").split(",") if x.strip()]
@@ -64,6 +66,10 @@ class ChatRequest(BaseModel):
     memory:bool=True
 class ChatResponse(BaseModel):
     answer:str; session_id:str; model:str
+class JobResponse(BaseModel):
+    id:str; type:str; status:str; progress:int; message:Optional[str]=None
+    result:Optional[str]=None; error:Optional[str]=None; session_id:Optional[str]=None
+    attempts:int=0
 class MemoryRequest(BaseModel):
     fact:str=Field(...,min_length=1,max_length=5000); source:str=Field(default="api",max_length=100)
 class PreferencesRequest(BaseModel):
@@ -254,6 +260,82 @@ def _attachments(paths):
             except (FileNotFoundError,PermissionError,ValueError) as exc:raise HTTPException(status_code=400,detail=f"Invalid document attachment: {path}") from exc
         except (FileNotFoundError,PermissionError) as exc:raise HTTPException(status_code=400,detail=f"Invalid image attachment: {path}") from exc
     return image_urls,rag_sources
+
+def _public_job(job):
+    if not job:
+        return None
+    payload = job.get("payload") or {}
+    return {
+        "id": job["id"],
+        "type": job["type"],
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "result": job["result"] if job["status"] == "completed" else None,
+        "error": job["error"] if job["status"] == "failed" else None,
+        "session_id": payload.get("session_id"),
+        "attempts": job["attempts"],
+        "created_at": job["created_at"],
+        "started_at": job["started_at"],
+        "completed_at": job["completed_at"],
+        "updated_at": job["updated_at"],
+    }
+
+
+@app.post("/api/v1/chat/jobs",status_code=202)
+def create_chat_job(request:ChatRequest,raw_request:Request):
+    _check_chat_rate_limit("chat-job:"+_client_key(raw_request))
+    if not os.getenv("GROQ_API_KEY"):
+        raise HTTPException(status_code=503,detail="GROQ_API_KEY is not configured.")
+
+    # Web and worker services have separate filesystems on Render. R2 is the
+    # shared file layer for attachment-backed jobs.
+    if request.attachment_paths:
+        from multimodal import r2_enabled
+        if not r2_enabled():
+            raise HTTPException(
+                status_code=503,
+                detail="Background jobs with attachments require Cloudflare R2.",
+            )
+        for path in request.attachment_paths:
+            try:
+                ensure_local_file(path)
+            except (FileNotFoundError,PermissionError):
+                raise HTTPException(status_code=400,detail=f"Invalid attachment: {path}")
+
+    job = create_job(
+        "chat",
+        {
+            "message":request.message,
+            "session_id":request.session_id,
+            "attachment_paths":request.attachment_paths,
+            "memory":request.memory,
+            "web_search":request.web_search,
+        },
+    )
+    try:
+        task = enqueue_chat_job(job["id"])
+        set_celery_task_id(job["id"],task.id)
+    except Exception as exc:
+        mark_failed(job["id"],str(exc))
+        raise HTTPException(status_code=503,detail="Background worker queue is unavailable.") from exc
+
+    return _public_job(get_job(job["id"]))
+
+
+@app.get("/api/v1/jobs",response_model=list[JobResponse])
+def get_jobs(status:str|None=None,limit:int=50):
+    statuses=[x.strip() for x in status.split(",")] if status else None
+    return [_public_job(job) for job in list_jobs(statuses=statuses,limit=limit)]
+
+
+@app.get("/api/v1/jobs/{job_id}",response_model=JobResponse)
+def get_job_status(job_id:str):
+    job=get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404,detail="Job not found.")
+    return _public_job(job)
+
 
 @app.post("/api/v1/chat",response_model=ChatResponse)
 def chat(request:ChatRequest):
