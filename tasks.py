@@ -30,7 +30,7 @@ class DurableJobTask(Task):
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
         mark_failed(task_id, str(exc))
-        logger.exception("Background job failed: %s", task_id, exc_info=(type(exc), exc, exc.__traceback__))
+        logger.error("Background job failed: %s: %s", task_id, exc)
 
     def on_success(self, retval, task_id, args, kwargs):
         # The task body writes the durable result before Celery acknowledges it.
