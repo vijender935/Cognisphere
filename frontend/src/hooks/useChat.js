@@ -7,7 +7,7 @@ export function getEditableLastUser(messages){if(!messages?.length||messages.len
 
 const ACTIVE_JOB_STATUSES=new Set(["queued","running","retrying"]);
 
-export default function useChat({API,chats,setChats,active,setActive,text,setText,attachments,setAttachments,loading,setLoading,notify,webSearch,memory}){
+export default function useChat({API,chats,setChats,active,setActive,text,setText,attachments,setAttachments,loading,setLoading,notify,webSearch,memory,authenticated}){
  const [streamController,setStreamController]=useState(null);
  const sendingRef=useRef(false);
  const pollingRef=useRef(new Map());
@@ -126,7 +126,7 @@ export default function useChat({API,chats,setChats,active,setActive,text,setTex
    return()=>{
      mountedRef.current=false;
    };
- },[API]);
+ },[API,authenticated]);
 
  async function regenerate(){
    if(loading||!chat?.messages?.length||chat.messages.at(-1)?.role!=="assistant")return;
