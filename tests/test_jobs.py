@@ -48,7 +48,7 @@ def test_chat_task_updates_postgres_job(monkeypatch):
         },
     )
     monkeypatch.setattr(tasks,"run_agent",lambda *args,**kwargs:"worker result")
-    result=tasks.run_chat_job.run(job["id"])
+    result=tasks.run_chat_job(job["id"])
 
     assert result=="worker result"
     stored=get_job(job["id"])
