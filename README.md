@@ -11,7 +11,8 @@ This repository is intentionally designed for one personal instance, not as a mu
 - Bounded conversation context.
 - Retry handling for transient model failures.
 - Tool-aware agent loop with execution limits and recovery.
-- Streaming responses through Server-Sent Events.
+- Streaming responses through Server-Sent Events for interactive requests.
+- Durable background chat jobs through Celery + Render Key Value + a dedicated worker; jobs continue if the browser disconnects.
 - Regenerate the latest answer.
 - Edit and resend a user message.
 - Multiple local chat sessions with titles, rename, delete, and clear-history controls.
@@ -82,12 +83,21 @@ This repository is intentionally designed for one personal instance, not as a mu
 
 ## Architecture
 
+Interactive requests can still use the normal FastAPI/SSE path. Long-running chat work uses a durable job path:
+
 ~~~
 React / Vite
      |
-     | HTTP + SSE
+     | POST job (fast 202 response)
      v
-FastAPI
+FastAPI Web Service
+     |                 |
+     |                 +--> PostgreSQL (durable job state/results)
+     v
+Render Key Value / Redis-compatible broker
+     |
+     v
+Celery Background Worker
      |
      v
 Agent runtime
@@ -100,9 +110,9 @@ Agent runtime
                          |
                          +--> configured servers
                          +--> OAuth
-     |
-     +--> PostgreSQL
-     +--> local file root / optional R2
+
+File attachments for background jobs use Cloudflare R2 as the shared file layer
+because Render web and worker services have separate filesystems.
 ~~~
 
 ## Single-user data model
@@ -128,7 +138,11 @@ Legacy user_id columns are removed by initialization/migration paths where appli
 - memory.py — semantic memory and RAG.
 - document_parser.py — document extraction and OCR routing.
 - multimodal.py — uploads, local file access and optional R2.
-- api.py — FastAPI REST/SSE API.
+- api.py — FastAPI REST/SSE API and durable job endpoints.
+- jobs.py — PostgreSQL-backed job state and results.
+- task_queue.py — Celery/Render Key Value queue configuration.
+- tasks.py — background task implementations and retry policy.
+- worker.py — Render Background Worker entrypoint.
 - connectors.py — MCP connector storage and validation.
 - mcp_registry.py — environment and connector MCP registry.
 - mcp_client.py — MCP discovery and execution.
@@ -197,10 +211,13 @@ MCP discovery reads all available tool pages and filters them through configured
 - Authentication uses an HttpOnly session cookie backed by the persistent database.
 - All application API routes are protected after login.
 - DATABASE_URL is mandatory; the application has no SQLite fallback.
+- CELERY_BROKER_URL is required for durable background jobs in deployed environments.
+- Background jobs are persisted in PostgreSQL and queued through Render Key Value.
+- Background jobs with attachments require R2 so the separate worker can access uploaded files.
 
 ## Deployment
 
-Render configuration is included for the FastAPI backend, React/Vite static frontend and persistent PostgreSQL database. The same single-user data model applies locally and when deployed.
+Render configuration includes the FastAPI web service, a dedicated Celery background worker, a persistent Render Key Value queue, the React/Vite static frontend and PostgreSQL. The worker is a paid compute service and the persistent queue uses a paid Key Value plan; this is required for a durable queue rather than an ephemeral/free cache.
 
 ## Security boundaries
 
