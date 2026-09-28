@@ -172,7 +172,7 @@ export default function useChat({API,chats,setChats,active,setActive,text,setTex
    if(!sendingRef.current)return;
    sendingRef.current=false;
    setLoading(false);
-   notify("UI polling stopped. The background job continues on the server.","success");
+   notify("UI polling stopped. The job continues in the current server process.","success");
  }
 
  function newChat(){
