@@ -172,7 +172,7 @@ def list_jobs(statuses: list[str] | None = None, limit: int = 50) -> list[dict]:
     with connect() as con:
         rows = con.execute(
             f"""SELECT id,type,status,payload,progress,message,result,error,
-                       celery_task_id,attempts,created_at,started_at,completed_at,updated_at
+                       attempts,created_at,started_at,completed_at,updated_at
                 FROM jobs{where} ORDER BY created_at DESC LIMIT ?""",
             (*params, limit),
         ).fetchall()
