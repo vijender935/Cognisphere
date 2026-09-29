@@ -153,16 +153,49 @@ try:
 except Exception:
     OAuthClientProvider=OAuthClientMetadata=OAuthToken=OAuthClientInformationFull=AuthorizationCodeResult=None
 
+def _secret_fernet():
+    key=os.getenv("MCP_HEADER_ENCRYPTION_KEY","").strip()
+    if not key:
+        raise RuntimeError("MCP_HEADER_ENCRYPTION_KEY is required for OAuth token storage.")
+    from cryptography.fernet import Fernet
+    try:
+        return Fernet(key)
+    except Exception:
+        import base64,hashlib
+        return Fernet(base64.urlsafe_b64encode(hashlib.sha256(key.encode()).digest()))
+
+
+def _encrypt_secret(value):
+    if not value:
+        return None
+    return "enc:" + _secret_fernet().encrypt(value.encode()).decode()
+
+
+def _decrypt_secret(value):
+    if not value:
+        return None
+    if not isinstance(value,str) or not value.startswith("enc:"):
+        # Legacy plaintext is readable for migration, but is never written back.
+        return value
+    try:
+        return _secret_fernet().decrypt(value[4:].encode()).decode()
+    except Exception:
+        return None
+
+
 class DatabaseOAuthStorage:
     def __init__(self,connector_id): self.connector_id=connector_id; init_oauth_db()
     def _read(self):
-        with connect() as con: row=con.execute("SELECT tokens,client_info FROM mcp_oauth_credentials WHERE connector_id=?",(self.connector_id,)).fetchone()
-        tokens= json.loads(row[0]) if row and row[0] else None
-        client= json.loads(row[1]) if row and row[1] else None
+        with connect() as con:
+            row=con.execute("SELECT tokens,client_info FROM mcp_oauth_credentials WHERE connector_id=?",(self.connector_id,)).fetchone()
+        raw_tokens=_decrypt_secret(row[0]) if row and row[0] else None
+        tokens=json.loads(raw_tokens) if raw_tokens else None
+        client=json.loads(row[1]) if row and row[1] else None
         return tokens,client
     def _write(self,tokens,client):
         with connect() as con:
-            values=(self.connector_id,json.dumps(tokens) if tokens else None,json.dumps(client) if client else None,time.time())
+            raw_tokens=json.dumps(tokens) if tokens else None
+            values=(self.connector_id,_encrypt_secret(raw_tokens) if raw_tokens else None,json.dumps(client) if client else None,time.time())
             con.execute("""INSERT INTO mcp_oauth_credentials(connector_id,tokens,client_info,updated_at) VALUES(?,?,?,?)
                 ON CONFLICT(connector_id) DO UPDATE SET tokens=excluded.tokens,client_info=excluded.client_info,updated_at=excluded.updated_at""",values)
     async def get_tokens(self):
