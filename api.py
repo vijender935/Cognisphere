@@ -62,7 +62,15 @@ app.add_middleware(SecurityHeadersMiddleware)
 PUBLIC_API_PATHS={"/health","/api/v1/info","/api/v1/auth/status","/api/v1/auth/setup","/api/v1/auth/login","/api/v1/mcp/oauth/callback"}
 @app.middleware("http")
 async def authentication_middleware(request:Request,call_next):
-    if request.method=="OPTIONS" or request.url.path in PUBLIC_API_PATHS or not request.url.path.startswith("/api/v1/"):
+    if request.method=="OPTIONS" or not request.url.path.startswith("/api/v1/"):
+        return await call_next(request)
+    if request.url.path in {"/api/v1/auth/setup"} and request.method=="POST":
+        origin=request.headers.get("origin")
+        allowed={o.rstrip("/") for o in origins}
+        if origin and origin.rstrip("/") not in allowed:
+            return JSONResponse({"detail":"Cross-origin setup blocked."},status_code=403)
+        return await call_next(request)
+    if request.url.path in PUBLIC_API_PATHS:
         return await call_next(request)
     account=get_account_for_session(request.cookies.get(SESSION_COOKIE))
     if not account:
@@ -362,6 +370,15 @@ def get_job_status(job_id:str):
     if not job:
         raise HTTPException(status_code=404,detail="Job not found.")
     return _public_job(job)
+
+@app.post("/api/v1/jobs/{job_id}/cancel",response_model=JobResponse)
+def cancel_chat_job(job_id:str):
+    from jobs import cancel_job
+    job=get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404,detail="Job not found.")
+    cancel_job(job_id)
+    return _public_job(get_job(job_id))
 
 
 @app.post("/api/v1/chat",response_model=ChatResponse)
