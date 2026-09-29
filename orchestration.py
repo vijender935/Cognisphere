@@ -110,6 +110,20 @@ def validate_tool_result(result: object) -> ToolResult:
     lowered = content.lower()
     if lowered.startswith(("tool error", "mcp tool error", "unknown tool", "error:")):
         return ToolResult(False, content, recoverable=True)
+    # Some remote MCP connectors surface HTTP failures as plain text instead
+    # of setting the MCP isError flag. Route common failures through recovery.
+    if any(
+        marker in lowered
+        for marker in (
+            "404 not found",
+            "status code 404",
+            "http 404",
+            "401 unauthorized",
+            "403 forbidden",
+            "429 too many requests",
+        )
+    ):
+        return ToolResult(False, content, recoverable=True)
     return ToolResult(True, content)
 
 
