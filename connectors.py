@@ -160,7 +160,7 @@ def init_connectors_db():
             con.execute("DROP INDEX IF EXISTS mcp_connectors_user_id_name_key")
             con.execute("ALTER TABLE mcp_connectors DROP COLUMN IF EXISTS user_id")
             if _get_fernet() is not None:
-                rows = con.execute("SELECT id, headers FROM mcp_connectors WHERE headers IS NOT NULL AND headers NOT LIKE 'enc:%'").fetchall()
+                rows = con.execute("SELECT id, headers FROM mcp_connectors WHERE headers IS NOT NULL AND headers NOT LIKE ?", ("enc:%",)).fetchall()
                 for connector_id, raw in rows:
                     try:
                         decoded = json.loads(raw or "{}")
