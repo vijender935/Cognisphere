@@ -262,9 +262,11 @@ def build_execution_plan(plan: TaskPlan) -> ExecutionPlan:
         steps.append("mcp_tool_execution")
     steps.extend(["validate_tool_results", "compose_answer"])
 
+    # Keep remote tool loops bounded. A single model round may contain
+    # multiple tool calls, so 4 rounds is enough for normal multi-step work
+    # while avoiding runaway MCP/Groq request bursts.
     max_tool_rounds = (
-        8 if plan.complexity == "complex"
-        else 4 if plan.complexity == "tool"
+        4 if plan.complexity in {"complex", "tool"}
         else 1
     )
     return ExecutionPlan(steps=tuple(steps), max_tool_rounds=max_tool_rounds)
