@@ -58,6 +58,23 @@ _MEMORY_TERMS = {
     "meri preference", "what did i tell you",
 }
 
+# Read-vs-write intent signals used by select_relevant_tools(). Generic
+# parameter keys (owner, repo, path...) exist on almost every GitHub MCP
+# tool, so plain keyword-overlap scoring alone cannot tell a read request
+# ("repo inspect karo") apart from a write request ("branch banao"). These
+# sets let the selector penalize mutation tools when the goal only signals
+# read intent, instead of relying on alphabetical tie-breaking.
+_READ_INTENT_TERMS = {
+    "inspect", "analyse", "analyze", "check", "review", "explain",
+    "batao", "dikhao", "dekho", "samjhao", "padho", "list", "show",
+    "read", "summarize", "summarise", "understand",
+}
+_MUTATION_TOOL_TERMS = {
+    "create", "update", "delete", "remove", "write", "push", "commit",
+    "branch", "merge", "close", "approve", "assign", "comment",
+    "label", "release", "tag", "fork", "trash", "copy",
+}
+
 
 def _contains(text: str, terms: set[str]) -> bool:
     return any(term in text for term in terms)
@@ -204,6 +221,14 @@ def select_relevant_tools(
     if not goal_terms:
         return []
 
+    # Read-only requests ("repo inspect karo") should not be forced into a
+    # mutation tool just because generic parameter keys (owner, repo, path)
+    # tie the score against read tools. Only suppress mutation tools when the
+    # goal has no explicit mutation term of its own.
+    read_intent = bool(goal_terms & _READ_INTENT_TERMS)
+    explicit_mutation = bool(goal_terms & _MUTATION_TOOL_TERMS)
+    suppress_mutations = read_intent and not explicit_mutation
+
     scored = []
     for schema in schemas:
         tool_name, metadata, display_name = _tool_metadata(schema)
@@ -232,6 +257,9 @@ def select_relevant_tools(
                 if candidate.startswith(term) or term.startswith(candidate):
                     score += 1
                     break
+
+        if suppress_mutations and (name_terms & _MUTATION_TOOL_TERMS):
+            score -= 5
 
         scored.append((score, display_name.lower(), schema))
 
