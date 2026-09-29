@@ -252,6 +252,12 @@ def _expand_tools_after_failure(goal, current_schemas, failure_text):
         f"{goal}\nTool failure: {failure_text}\n"
         "Recover by finding the correct resource or arguments before retrying."
     )
+    failure_lower = str(failure_text).lower()
+    if "404" in failure_lower or "not found" in failure_lower:
+        recovery_goal += (
+            "\nThe previous resource lookup returned 404. "
+            "Search or discover the exact resource name before inspecting it."
+        )
     expanded = select_relevant_tools(catalog, recovery_goal, max_tools=8)
     merged = list(current_schemas)
     existing = {str(s.get("function", {}).get("name", "")) for s in merged}
