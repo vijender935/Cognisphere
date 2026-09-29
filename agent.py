@@ -276,7 +276,7 @@ def _compact_runtime_messages(messages):
         if item.get("role") == "tool":
             content = str(item.get("content", ""))
             if len(content) > tool_limit:
-                item["content"] = content[:tool_limit] + "\n[Tool result truncated.]")
+                item["content"] = content[:tool_limit] + "\n[Tool result truncated.]"
         normalized.append(item)
 
     systems = [m for m in normalized if m.get("role") == "system"]
@@ -364,25 +364,41 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
         ]
 
     state = ExecutionState()
-    prepared_final_response = False
     while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
+        messages = _compact_runtime_messages(messages)
         for retry in range(MAX_RETRIES + 1):
             try:
-                response = client.chat.completions.create(
-                    model=VISION_MODEL if image_urls else MODEL,
-                    messages=messages,
-                    **({"tools": tool_schemas, "tool_choice": _tool_choice_for_turn(tool_schemas, task_plan, state)} if tool_schemas else {}),
-                    temperature=0.4,
-                )
+                request_kwargs = {
+                    "model": VISION_MODEL if image_urls else MODEL,
+                    "messages": messages,
+                    "temperature": 0.4,
+                    "max_completion_tokens": _completion_budget(bool(tool_schemas)),
+                    "truncation": "auto",
+                }
+                if tool_schemas:
+                    request_kwargs.update({
+                        "tools": tool_schemas,
+                        "tool_choice": _tool_choice_for_turn(tool_schemas, task_plan, state),
+                    })
+                response = client.chat.completions.create(**request_kwargs)
                 break
             except Exception as exc:
-                logger.warning("Model request failed (retry %s/%s, tools=%s): %s", retry, MAX_RETRIES, [s.get("function", {}).get("name") for s in tool_schemas], exc)
+                if _is_context_length_error(exc):
+                    messages = _compact_runtime_messages(messages)
+                    logger.warning("Groq context limit hit; compacted messages (round=%s, chars=%s)",
+                                   state.round_number,
+                                   sum(len(str(m.get("content", ""))) for m in messages))
+                    if retry < MAX_RETRIES:
+                        continue
+                logger.warning("Model request failed (retry %s/%s, tools=%s): %s",
+                               retry, MAX_RETRIES,
+                               [s.get("function", {}).get("name") for s in tool_schemas], exc)
                 if retry < MAX_RETRIES:
                     time.sleep(2 ** retry)
         if response is None:
-            return "❌ Model/API request failed after retries. Model/tool schema compatibility issue ho sakta hai; server logs me exact error recorded hai."
+            return "❌ Model/API request failed after retries. Context/tool request could not be accepted; server logs me exact error recorded hai."
 
         msg = response.choices[0].message
         messages.append(msg.model_dump(exclude_none=True))
@@ -462,6 +478,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
     while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
+        messages = _compact_runtime_messages(messages)
 
         for retry in range(MAX_RETRIES + 1):
             try:
@@ -469,6 +486,8 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                     "model": VISION_MODEL if image_urls else MODEL,
                     "messages": messages,
                     "temperature": 0.4,
+                    "max_completion_tokens": _completion_budget(bool(tool_schemas)),
+                    "truncation": "auto",
                 }
                 if tool_schemas:
                     request_kwargs.update({
@@ -478,18 +497,21 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                 response = client.chat.completions.create(**request_kwargs)
                 break
             except Exception as exc:
-                logger.warning(
-                    "Streaming preparation request failed (retry %s/%s, tools=%s): %s",
-                    retry,
-                    MAX_RETRIES,
-                    [s.get("function", {}).get("name") for s in tool_schemas],
-                    exc,
-                )
+                if _is_context_length_error(exc):
+                    messages = _compact_runtime_messages(messages)
+                    logger.warning("Groq context limit hit during streaming; compacted messages (round=%s, chars=%s)",
+                                   state.round_number,
+                                   sum(len(str(m.get("content", ""))) for m in messages))
+                    if retry < MAX_RETRIES:
+                        continue
+                logger.warning("Streaming preparation request failed (retry %s/%s, tools=%s): %s",
+                               retry, MAX_RETRIES,
+                               [s.get("function", {}).get("name") for s in tool_schemas], exc)
                 if retry < MAX_RETRIES:
                     time.sleep(2 ** retry)
 
         if response is None:
-            yield "❌ Model/API request failed after retries. Model/tool schema compatibility issue ho sakta hai; server logs me exact error recorded hai."
+            yield "❌ Model/API request failed after retries. Context/tool request could not be accepted; server logs me exact error recorded hai."
             return
 
         msg = response.choices[0].message
