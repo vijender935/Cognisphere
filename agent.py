@@ -249,6 +249,85 @@ def _prepare_goal(goal):
         except Exception as exc:
             logger.warning("Semantic memory unavailable: %s", exc)
 
+def _is_context_length_error(exc):
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    return status == 400 and ("reduce the length" in text or "messages or completion" in text or "context length" in text or "maximum context" in text)
+
+
+def _runtime_context_limit():
+    try:
+        value = int(os.getenv("MAX_RUNTIME_CONTEXT_CHARS", "14000"))
+    except ValueError:
+        value = 14000
+    return max(8000, min(value, 60000))
+
+
+def _compact_runtime_messages(messages):
+    """Bound live agent context after tool results are appended."""
+    limit = _runtime_context_limit()
+    try:
+        tool_limit = max(1000, int(os.getenv("MAX_TOOL_RESULT_CHARS", "3500")))
+    except ValueError:
+        tool_limit = 3500
+    normalized = []
+    for message in messages:
+        item = dict(message)
+        if item.get("role") == "tool":
+            content = str(item.get("content", ""))
+            if len(content) > tool_limit:
+                item["content"] = content[:tool_limit] + "\n[Tool result truncated.]")
+        normalized.append(item)
+
+    systems = [m for m in normalized if m.get("role") == "system"]
+    user_indexes = [i for i, m in enumerate(normalized) if m.get("role") == "user"]
+    last_user = user_indexes[-1] if user_indexes else -1
+    current_user = normalized[last_user] if last_user >= 0 else None
+
+    rounds = []
+    current = []
+    for message in normalized[last_user + 1:] if last_user >= 0 else []:
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            if current:
+                rounds.append(current)
+            current = [message]
+        elif current and message.get("role") == "tool":
+            current.append(message)
+        elif current:
+            rounds.append(current)
+            current = []
+    if current:
+        rounds.append(current)
+
+    tail = []
+    for exchange in rounds[-2:]:
+        tail.extend(exchange)
+    if not tail and last_user > 0:
+        prior = [m for m in normalized[:last_user] if m.get("role") in {"user", "assistant"}]
+        tail.extend(prior[-4:])
+    if current_user is not None:
+        tail.append(current_user)
+
+    result = systems + tail
+    seen = set()
+    result = [m for m in result if not (id(m) in seen or seen.add(id(m)))]
+    def total_size(items):
+        return sum(len(str(m.get("content", ""))) for m in items)
+    while total_size(result) > limit:
+        index = next((i for i, m in enumerate(result) if m.get("role") in {"user", "assistant"} and not m.get("tool_calls") and m is not current_user), None)
+        if index is None:
+            break
+        result.pop(index)
+    return result
+
+
+def _completion_budget(has_tools):
+    try:
+        value = int(os.getenv("MAX_COMPLETION_TOKENS", "1024" if has_tools else "2048"))
+    except ValueError:
+        value = 1024 if has_tools else 2048
+    return max(256, min(value, 4096))
+
 def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, verbose=True, memory_enabled=True, web_search_enabled=True):
     goal = goal.strip()
     if not goal:
