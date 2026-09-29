@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 from pathlib import Path
 
 SUPPORTED_DOCUMENT_EXTENSIONS = {
@@ -39,7 +40,10 @@ def _pdf_file(path: Path) -> str:
 
     native_pages = []
     needs_ocr = False
+    max_pages = max(1, int(os.getenv("MAX_DOCUMENT_PAGES", "50")))
     with fitz.open(path) as document:
+        if document.page_count > max_pages:
+            raise ValueError(f"PDF exceeds the {max_pages}-page processing limit.")
         for page in document:
             text = page.get_text("text").strip()
             native_pages.append(text)
@@ -88,6 +92,7 @@ def extract_text(path: str | Path) -> str:
 
 
 def extract_and_limit(path: str | Path, max_chars: int = 500_000) -> str:
+    max_chars = max(1000, min(int(max_chars), int(os.getenv("MAX_DOCUMENT_CHARS", "500000"))))
     text = extract_text(path).strip()
     if not text:
         raise ValueError("No readable text was found in the document.")

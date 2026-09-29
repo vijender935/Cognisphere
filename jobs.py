@@ -106,6 +106,22 @@ def requeue_interrupted_jobs() -> None:
         )
 
 
+def cancel_job(job_id: str) -> None:
+    with connect() as con:
+        con.execute(
+            """UPDATE jobs SET status='cancelled',message='Cancelled by user',
+               completed_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+               WHERE id=? AND status IN ('queued','running','retrying')""",
+            (job_id,),
+        )
+
+
+def is_cancelled(job_id: str) -> bool:
+    with connect() as con:
+        row=con.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+    return bool(row and row[0] == "cancelled")
+
+
 def mark_running(job_id: str) -> None:
     with connect() as con:
         con.execute(

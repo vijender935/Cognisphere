@@ -9,7 +9,7 @@ from agent import run_agent
 from document_parser import is_supported_document
 from multimodal import image_data_url, r2_enabled, ensure_local_file
 from config import FILE_ROOT
-from jobs import get_job, mark_completed, mark_failed, mark_progress, mark_retrying, mark_running
+from jobs import get_job, mark_completed, mark_failed, mark_progress, mark_retrying, mark_running, is_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,8 @@ def _execute_once(job_id: str) -> str:
 
     if job["status"] == "completed":
         return job["result"] or ""
+    if job["status"] == "cancelled" or is_cancelled(job_id):
+        return "Job cancelled."
 
     mark_running(job_id)
     payload = job["payload"]
@@ -58,6 +60,8 @@ def _execute_once(job_id: str) -> str:
     if isinstance(answer, str) and answer.startswith("❌"):
         raise RuntimeError(answer)
 
+    if is_cancelled(job_id):
+        return "Job cancelled."
     mark_progress(job_id, 95, "Saving result")
     mark_completed(job_id, answer)
     return answer
@@ -72,6 +76,8 @@ def run_chat_job(job_id: str) -> str:
         try:
             return _execute_once(job_id)
         except Exception as exc:
+            if is_cancelled(job_id):
+                return "Job cancelled."
             if attempt >= max_retries:
                 mark_failed(job_id, str(exc))
                 raise

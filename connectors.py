@@ -106,9 +106,11 @@ def _get_fernet():
 
 def _encrypt_headers(header_map: dict) -> str:
     payload = json.dumps(header_map)
+    if not header_map:
+        return "enc:"
     fernet = _get_fernet()
     if fernet is None:
-        return payload
+        raise RuntimeError("MCP_HEADER_ENCRYPTION_KEY is required before storing MCP headers.")
     return "enc:" + fernet.encrypt(payload.encode()).decode()
 
 
@@ -157,6 +159,14 @@ def init_connectors_db():
         with connect() as con:
             con.execute("DROP INDEX IF EXISTS mcp_connectors_user_id_name_key")
             con.execute("ALTER TABLE mcp_connectors DROP COLUMN IF EXISTS user_id")
+            if _get_fernet() is not None:
+                rows = con.execute("SELECT id, headers FROM mcp_connectors WHERE headers IS NOT NULL AND headers NOT LIKE 'enc:%'").fetchall()
+                for connector_id, raw in rows:
+                    try:
+                        decoded = json.loads(raw or "{}")
+                    except (TypeError, json.JSONDecodeError):
+                        decoded = {}
+                    con.execute("UPDATE mcp_connectors SET headers=? WHERE id=?", (_encrypt_headers(decoded if isinstance(decoded, dict) else {}), connector_id))
         _LEGACY_MIGRATED = True
 
 

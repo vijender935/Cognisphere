@@ -13,7 +13,10 @@ def test_permissions(monkeypatch):
  c=load_server_configs()[0];assert c.name=="github" and tool_allowed(c,"list_issues") and not tool_allowed(c,"delete_repository")
 def test_connector_header_persistence(monkeypatch):
  import connectors
+ from cryptography.fernet import Fernet
  monkeypatch.delenv("ALLOW_LOCAL_MCP",raising=False)
+ monkeypatch.setenv("MCP_HEADER_ENCRYPTION_KEY",Fernet.generate_key().decode())
+ connectors._FERNET=None
  name="github-test"
  try:
   c=connectors.upsert_connector(name,"streamable-http","https://example.com/mcp",headers={"Authorization":"Bearer secret"})
