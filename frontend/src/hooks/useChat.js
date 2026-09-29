@@ -139,7 +139,7 @@ export default function useChat({API,chats,setChats,active,setActive,text,setTex
    setText("");
    setLoading(true);
    try{
-     const r=await apiFetch(API+"/api/v1/chat/jobs",{
+     const r=await apiFetch(API+"/api/v1/chat/dispatch",{
        method:"POST",
        headers:{"Content-Type":"application/json"},
        body:JSON.stringify({
@@ -151,14 +151,21 @@ export default function useChat({API,chats,setChats,active,setActive,text,setTex
        })
      });
      if(!r.ok){
-       update([...next.slice(0,-1),{role:"user",content:message},{role:"assistant",content:await responseDetail(r,"Could not queue background job.") }]);
+       update([...next.slice(0,-1),{role:"user",content:message},{role:"assistant",content:await responseDetail(r,"Could not process message.") }]);
        sendingRef.current=false;
        setLoading(false);
        return;
      }
-     const job=await r.json();
-     applyJob({...job,user_message:message});
-     pollJob(job.id,{...job,user_message:message});
+     const payload=await r.json();
+     if(payload.mode==="sync"){
+       update([...next.slice(0,-1),{role:"user",content:message},{role:"assistant",content:payload.answer||""}]);
+       sendingRef.current=false;
+       setLoading(false);
+       return;
+     }
+     const job={...(payload.job||{}),user_message:message};
+     applyJob(job);
+     pollJob(job.id,job);
    }catch(e){
      update([...next.slice(0,-1),{role:"user",content:message},{role:"assistant",content:e.message||"Could not queue background job."}]);
      sendingRef.current=false;
