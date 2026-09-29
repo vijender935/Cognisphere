@@ -259,6 +259,37 @@ def _expand_tools_after_failure(goal, current_schemas, failure_text):
             "Search or discover the exact resource name before inspecting it."
         )
     expanded = select_relevant_tools(catalog, recovery_goal, max_tools=8)
+
+    # Recovery must be discovery-first. After a failed lookup/reference
+    # operation, do not let another mutation tool win the next model round.
+    recovery_discovery_terms = (
+        "search", "find", "discover", "list", "lookup", "query",
+        "fetch", "get", "read", "inspect", "repository", "repo",
+        "file", "files", "contents", "tree", "code",
+    )
+    recovery_mutation_terms = (
+        "create", "update", "delete", "remove", "write", "push",
+        "commit", "branch", "merge", "close", "approve", "assign",
+        "comment", "label", "review", "release", "tag",
+    )
+    reference_failure = any(
+        marker in failure_lower
+        for marker in (
+            "404", "not found", "reference update failed",
+            "unknown repository", "invalid ref", "invalid reference",
+        )
+    )
+    if reference_failure:
+        discovery = []
+        for schema in expanded:
+            name = str(schema.get("function", {}).get("name", "")).lower()
+            is_discovery = any(term in name for term in recovery_discovery_terms)
+            is_mutation = any(term in name for term in recovery_mutation_terms)
+            if is_discovery and not is_mutation:
+                discovery.append(schema)
+        if discovery:
+            expanded = discovery
+
     merged = list(current_schemas)
     existing = {str(s.get("function", {}).get("name", "")) for s in merged}
     for schema in expanded:
