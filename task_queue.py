@@ -15,7 +15,7 @@ import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 
-from jobs import list_jobs
+from jobs import list_jobs, is_cancelled
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,8 @@ def _run(job_id: str) -> None:
     from tasks import run_chat_job
 
     try:
+        if is_cancelled(job_id):
+            return
         run_chat_job(job_id)
     except Exception:
         logger.exception("Background job failed: %s", job_id)
