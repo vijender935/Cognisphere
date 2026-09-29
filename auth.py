@@ -5,7 +5,7 @@ from datetime import datetime,timezone
 from db import connect
 
 SESSION_COOKIE="pa_session"
-SESSION_DAYS=max(1,int(os.getenv("AUTH_SESSION_DAYS","30")))
+SESSION_DAYS=max(1,int(os.getenv("AUTH_SESSION_DAYS","7")))
 PBKDF2_ITERATIONS=max(100_000,int(os.getenv("AUTH_PBKDF2_ITERATIONS","310000")))
 def _now(): return int(time.time())
 def _hash_password(password):
@@ -24,7 +24,13 @@ def init_auth_db():
     with connect() as con:
         con.execute("""CREATE TABLE IF NOT EXISTS account(id INTEGER PRIMARY KEY,display_name TEXT NOT NULL,email TEXT NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL)""")
         con.execute("""CREATE TABLE IF NOT EXISTS auth_sessions(token_hash TEXT PRIMARY KEY,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL)""")
+        con.execute("""CREATE TABLE IF NOT EXISTS auth_login_attempts(
+            bucket TEXT PRIMARY KEY,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL
+        )""")
         con.execute("DELETE FROM auth_sessions WHERE expires_at<=?",(_now(),))
+        con.execute("DELETE FROM auth_login_attempts WHERE updated_at<?",(_now()-900,))
 def account_exists():
     init_auth_db()
     with connect() as con: return bool(con.execute("SELECT id FROM account WHERE id=1").fetchone())
@@ -41,6 +47,28 @@ def setup_account(display_name,email,password):
     now=datetime.now(timezone.utc).isoformat()
     with connect() as con: con.execute("INSERT INTO account(id,display_name,email,password_hash,created_at,updated_at) VALUES(1,?,?,?,?,?)",(display_name,email,_hash_password(password),now,now))
     return account_public()
+
+def login_rate_limited(key: str, limit: int = 8, window_seconds: int = 900) -> bool:
+    """Atomically rate-limit login attempts in PostgreSQL across all app instances."""
+    now = _now()
+    bucket = f"{key}:{now // window_seconds}"
+    with connect() as con:
+        row = con.execute(
+            """INSERT INTO auth_login_attempts(bucket, attempts, updated_at)
+               VALUES(?,?,?)
+               ON CONFLICT(bucket) DO UPDATE SET
+                   attempts=auth_login_attempts.attempts+1,
+                   updated_at=excluded.updated_at
+               RETURNING attempts""",
+            (bucket, 1, now),
+        ).fetchone()
+    return bool(row and int(row[0]) > limit)
+
+
+def clear_login_rate_limit(key: str) -> None:
+    with connect() as con:
+        con.execute("DELETE FROM auth_login_attempts WHERE bucket LIKE ?", (f"{key}:%",))
+
 def login(email,password):
     init_auth_db();email=email.strip().lower()
     with connect() as con: row=con.execute("SELECT id,display_name,email,password_hash,created_at,updated_at FROM account WHERE id=1").fetchone()
