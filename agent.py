@@ -283,6 +283,11 @@ def _is_context_length_error(exc):
     text = str(exc).lower()
     return status == 400 and ("reduce the length" in text or "messages or completion" in text or "context length" in text or "maximum context" in text)
 
+def _is_rate_limit_error(exc):
+    status = getattr(exc, "status_code", None)
+    text = str(exc).lower()
+    return status == 429 or "429 too many requests" in text or "rate limit" in text
+
 
 def _runtime_context_limit():
     try:
@@ -414,6 +419,12 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
                 response = client.chat.completions.create(**request_kwargs)
                 break
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    logger.warning("Groq rate limit hit; avoiding rapid retry burst.")
+                    if retry < MAX_RETRIES:
+                        time.sleep(8)
+                        continue
+                    return "⚠️ Groq rate limit hit. Tool execution ko unnecessary retry burst se bachane ke liye rok diya gaya; thodi der baad task retry karo."
                 if _is_context_length_error(exc):
                     messages = _compact_runtime_messages(messages)
                     logger.warning("Groq context limit hit; compacted messages (round=%s, chars=%s)",
@@ -541,6 +552,12 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                 response = client.chat.completions.create(**request_kwargs)
                 break
             except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    logger.warning("Groq rate limit hit; avoiding rapid retry burst.")
+                    if retry < MAX_RETRIES:
+                        time.sleep(8)
+                        continue
+                    return "⚠️ Groq rate limit hit. Tool execution ko unnecessary retry burst se bachane ke liye rok diya gaya; thodi der baad task retry karo."
                 if _is_context_length_error(exc):
                     messages = _compact_runtime_messages(messages)
                     logger.warning("Groq context limit hit during streaming; compacted messages (round=%s, chars=%s)",
