@@ -328,20 +328,40 @@ def _runtime_context_limit():
     return max(8000, min(value, 60000))
 
 
+def _truncate_tool_content(content, limit):
+    """Truncate long tool results on a safer boundary than a raw char cut.
+
+    Directory/file-listing results are typically a JSON array of objects
+    ("},{" between entries). Cutting at an arbitrary character mid-object
+    hands the model invalid/broken JSON, which can make it re-issue the
+    identical call instead of using the still-useful partial listing. Cut
+    right after the last complete "}," boundary before the limit when one
+    exists, so the model gets a parseable (if partial) result.
+    """
+    if len(content) <= limit:
+        return content
+    boundary = content.rfind("},{", 0, limit)
+    if boundary != -1:
+        content = content[: boundary + 1] + "]"
+    else:
+        content = content[:limit]
+    return content + "\n[Tool result truncated.]"
+
+
 def _compact_runtime_messages(messages):
     """Bound live agent context after tool results are appended."""
     limit = _runtime_context_limit()
     try:
-        tool_limit = max(1000, int(os.getenv("MAX_TOOL_RESULT_CHARS", "1800")))
+        tool_limit = max(1000, int(os.getenv("MAX_TOOL_RESULT_CHARS", "4000")))
     except ValueError:
-        tool_limit = 3500
+        tool_limit = 4000
     normalized = []
     for message in messages:
         item = dict(message)
         if item.get("role") == "tool":
             content = str(item.get("content", ""))
             if len(content) > tool_limit:
-                item["content"] = content[:tool_limit] + "\n[Tool result truncated.]"
+                item["content"] = _truncate_tool_content(content, tool_limit)
         normalized.append(item)
 
     systems = [m for m in normalized if m.get("role") == "system"]
@@ -430,6 +450,7 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
 
     state = ExecutionState()
     failed_call_signatures = set()
+    successful_call_results = {}
     while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
@@ -495,6 +516,16 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
                     f"Tool error in {name}: the identical tool call already failed. "
                     "Do not repeat it; use a search/discovery tool or change the arguments."
                 )
+            elif call_signature in successful_call_results:
+                # Same tool + same arguments already succeeded earlier this turn.
+                # Reuse the cached result instead of hitting the remote MCP server
+                # again, and tell the model plainly so it stops re-fetching the
+                # identical data instead of moving the task forward.
+                result = (
+                    f"Tool '{name}' was already called with these exact arguments "
+                    "earlier in this task; reuse that result instead of calling it "
+                    "again:\n" + successful_call_results[call_signature]
+                )
             else:
                 result = _execute_tool(name, args)
             validated = validate_tool_result(result)
@@ -510,6 +541,7 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
             })
             if validated.ok:
                 state.consecutive_failures = 0
+                successful_call_results.setdefault(call_signature, validated.content)
             else:
                 state.consecutive_failures += 1
                 failed_call_signatures.add(call_signature)
@@ -523,7 +555,7 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
 
     if state.consecutive_failures >= 2:
         return "⚠️ Tool execution repeatedly failed. Maine unsafe/infinite retry se bachne ke liye execution stop kar diya."
-    return f"⚠️ Max tool iterations ({MAX_ITERATIONS}) reached — task incomplete reh gaya."
+    return f"⚠️ Max tool iterations ({tool_round_limit}) reached — task incomplete reh gaya."
 
 def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, memory_enabled=True, web_search_enabled=True):
     """Execute tools first when required, then stream the final assistant response."""
@@ -562,6 +594,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
 
     state = ExecutionState()
     failed_call_signatures = set()
+    successful_call_results = {}
     while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
@@ -635,6 +668,16 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                     f"Tool error in {name}: the identical tool call already failed. "
                     "Do not repeat it; use a search/discovery tool or change the arguments."
                 )
+            elif call_signature in successful_call_results:
+                # Same tool + same arguments already succeeded earlier this turn.
+                # Reuse the cached result instead of hitting the remote MCP server
+                # again, and tell the model plainly so it stops re-fetching the
+                # identical data instead of moving the task forward.
+                result = (
+                    f"Tool '{name}' was already called with these exact arguments "
+                    "earlier in this task; reuse that result instead of calling it "
+                    "again:\n" + successful_call_results[call_signature]
+                )
             else:
                 result = _execute_tool(name, args)
             validated = validate_tool_result(result)
@@ -651,6 +694,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
 
             if validated.ok:
                 state.consecutive_failures = 0
+                successful_call_results.setdefault(call_signature, validated.content)
             else:
                 state.consecutive_failures += 1
                 failed_call_signatures.add(call_signature)
