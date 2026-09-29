@@ -45,7 +45,7 @@ if not os.getenv("DATABASE_URL","").strip(): raise RuntimeError("DATABASE_URL is
 init_db(); init_jobs_db(); requeue_interrupted_jobs(); init_semantic_store(); init_connectors_db(); init_preferences_db(); init_auth_db(); recover_pending_jobs()
 
 app=FastAPI(title="Personal AI Assistant API",version="1.0.0",description="REST API for a single-user personal AI assistant.")
-origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000,http://localhost:5173").split(",") if x.strip()]
+configured_origins=[x.strip().rstrip("/") for x in os.getenv("CORS_ORIGINS","").split(",") if x.strip()]\n# Keep the deployed first-party frontend allowed even if CORS_ORIGINS is unset or stale.\n# Additional origins can still be supplied through CORS_ORIGINS.\norigins=list(dict.fromkeys(configured_origins+[\n    "https://personal-ai-assistant-frontend.onrender.com",\n    "http://localhost:3000",\n    "http://localhost:5173",\n]))
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["GET","POST","PATCH","DELETE","OPTIONS"],allow_headers=["*"])
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self,request,call_next):
