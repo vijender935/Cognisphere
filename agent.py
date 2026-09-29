@@ -239,6 +239,29 @@ def _execute_tool(name, args):
         logger.exception("Tool failed: %s", name)
         return f"Tool error in {name}: {exc}"
 
+def _expand_tools_after_failure(goal, current_schemas, failure_text):
+    """Add recovery tools from the cached MCP catalog after a tool failure."""
+    try:
+        from mcp_client import discover_tool_schemas
+        catalog = discover_tool_schemas()
+    except Exception as exc:
+        logger.warning("MCP recovery discovery unavailable: %s", exc)
+        return current_schemas
+
+    recovery_goal = (
+        f"{goal}\nTool failure: {failure_text}\n"
+        "Recover by finding the correct resource or arguments before retrying."
+    )
+    expanded = select_relevant_tools(catalog, recovery_goal, max_tools=8)
+    merged = list(current_schemas)
+    existing = {str(s.get("function", {}).get("name", "")) for s in merged}
+    for schema in expanded:
+        name = str(schema.get("function", {}).get("name", ""))
+        if name and name not in existing:
+            merged.append(schema)
+            existing.add(name)
+    return _prepare_tool_schemas(merged)
+
 def _prepare_goal(goal):
     explicit_memory = _extract_memory_candidate(goal)
     if explicit_memory:
@@ -364,6 +387,7 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
         ]
 
     state = ExecutionState()
+    failed_call_signatures = set()
     while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
@@ -417,7 +441,14 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
             if verbose:
                 logger.info("Tool call: %s(%s)", name, args)
 
-            result = _execute_tool(name, args)
+            call_signature = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
+            if call_signature in failed_call_signatures:
+                result = (
+                    f"Tool error in {name}: the identical tool call already failed. "
+                    "Do not repeat it; use a search/discovery tool or change the arguments."
+                )
+            else:
+                result = _execute_tool(name, args)
             validated = validate_tool_result(result)
             messages.append({
                 "role": "tool",
@@ -429,6 +460,10 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
                 state.consecutive_failures = 0
             else:
                 state.consecutive_failures += 1
+                failed_call_signatures.add(call_signature)
+                tool_schemas = _expand_tools_after_failure(
+                    goal, tool_schemas, validated.content
+                )
                 messages.append({
                     "role": "system",
                     "content": recovery_instruction(name, validated),
@@ -474,6 +509,7 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
         ]
 
     state = ExecutionState()
+    failed_call_signatures = set()
     while should_continue_execution(state, tool_round_limit):
         state.round_number += 1
         response = None
@@ -535,7 +571,14 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
             except json.JSONDecodeError:
                 args = {}
 
-            result = _execute_tool(name, args)
+            call_signature = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
+            if call_signature in failed_call_signatures:
+                result = (
+                    f"Tool error in {name}: the identical tool call already failed. "
+                    "Do not repeat it; use a search/discovery tool or change the arguments."
+                )
+            else:
+                result = _execute_tool(name, args)
             validated = validate_tool_result(result)
             messages.append({
                 "role": "tool",
@@ -548,6 +591,10 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                 state.consecutive_failures = 0
             else:
                 state.consecutive_failures += 1
+                failed_call_signatures.add(call_signature)
+                tool_schemas = _expand_tools_after_failure(
+                    goal, tool_schemas, validated.content
+                )
                 messages.append({
                     "role": "system",
                     "content": recovery_instruction(name, validated),
