@@ -273,6 +273,8 @@ async def complete_oauth(flow_id,code,state=None,iss=None):
     if not flow and state:
         flow_id=_STATE_TO_FLOW.get(state); flow=_FLOWS.get(flow_id) if flow_id else None
     if not flow:raise ValueError("OAuth flow expired or was not found.")
+    if not state or not flow.oauth_state or not secrets.compare_digest(str(state), str(flow.oauth_state)):
+        raise ValueError("OAuth state mismatch.")
     if flow.callback.done():raise ValueError("OAuth callback was already submitted.")
     flow.callback.set_result(AuthorizationCodeResult(code=code,state=state,iss=iss))
     try:await asyncio.wait_for(asyncio.shield(flow.task),timeout=120)
