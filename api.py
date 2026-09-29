@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json,logging,os,time
 from typing import Optional,Any
+from urllib.parse import urlparse
 from fastapi import FastAPI,File,HTTPException,UploadFile,Request
 from fastapi.responses import FileResponse,StreamingResponse,HTMLResponse,JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,20 +20,24 @@ from preferences import init_preferences_db,get_preferences,update_preferences
 from jobs import init_jobs_db,create_job,get_job,list_jobs,mark_failed,requeue_interrupted_jobs
 from task_queue import enqueue_chat_job,recover_pending_jobs,active_job_count
 from document_parser import extract_and_limit,is_supported_document
-from auth import SESSION_COOKIE,SESSION_DAYS,init_auth_db,account_exists,setup_account,login as auth_login,get_account_for_session,logout as auth_logout,update_account,change_password
+from auth import SESSION_COOKIE,SESSION_DAYS,init_auth_db,account_exists,setup_account,login as auth_login,get_account_for_session,logout as auth_logout,update_account,change_password,login_rate_limited,clear_login_rate_limit
 logger=logging.getLogger(__name__)
-CHAT_RATE_LIMIT=max(1,int(os.getenv("CHAT_RATE_LIMIT","30"))); CHAT_RATE_WINDOW=max(1,int(os.getenv("CHAT_RATE_WINDOW","60"))); _chat_attempts={}
+CHAT_RATE_LIMIT=max(1,int(os.getenv("CHAT_RATE_LIMIT","30"))); CHAT_RATE_WINDOW=max(1,int(os.getenv("CHAT_RATE_WINDOW","60")))
 
 def _client_key(request):
     return request.client.host if request.client else "unknown"
+
 def _check_chat_rate_limit(key):
-    now=time.monotonic(); attempts=[x for x in _chat_attempts.get(key,[]) if now-x<CHAT_RATE_WINDOW]
-    if len(attempts)>=CHAT_RATE_LIMIT: raise HTTPException(status_code=429,detail="Too many chat requests. Try again later.")
-    attempts.append(now); _chat_attempts[key]=attempts
-    if len(_chat_attempts)>10000:
-        cutoff=now-CHAT_RATE_WINDOW
-        for k,v in list(_chat_attempts.items()):
-            if not v or v[-1]<cutoff:_chat_attempts.pop(k,None)
+    from db import connect
+    now=int(time.time()); window=now//CHAT_RATE_WINDOW; bucket=f"chat:{key}:{window}"
+    with connect() as con:
+        row=con.execute(
+            """INSERT INTO auth_login_attempts(bucket,attempts,updated_at) VALUES(?,?,?)
+               ON CONFLICT(bucket) DO UPDATE SET attempts=auth_login_attempts.attempts+1,updated_at=excluded.updated_at
+               RETURNING attempts""",(bucket,1,now)).fetchone()
+    if row and int(row[0])>CHAT_RATE_LIMIT:
+        raise HTTPException(status_code=429,detail="Too many chat requests. Try again later.")
+
 
 ensure_directories()
 if not os.getenv("DATABASE_URL","").strip(): raise RuntimeError("DATABASE_URL is required.")
@@ -43,7 +48,15 @@ origins=[x.strip() for x in os.getenv("CORS_ORIGINS","http://localhost:3000,http
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["GET","POST","PATCH","DELETE","OPTIONS"],allow_headers=["*"])
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self,request,call_next):
-        response=await call_next(request); response.headers.setdefault("X-Content-Type-Options","nosniff"); response.headers.setdefault("X-Frame-Options","DENY"); response.headers.setdefault("Referrer-Policy","strict-origin-when-cross-origin"); return response
+        response=await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options","nosniff")
+        response.headers.setdefault("X-Frame-Options","DENY")
+        response.headers.setdefault("Referrer-Policy","strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy","camera=(),microphone=(),geolocation=()")
+        response.headers.setdefault("Content-Security-Policy","default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+        if request.url.scheme=="https" or os.getenv("FORCE_SECURE_COOKIES","1")=="1":
+            response.headers.setdefault("Strict-Transport-Security","max-age=31536000; includeSubDomains")
+        return response
 app.add_middleware(SecurityHeadersMiddleware)
 
 PUBLIC_API_PATHS={"/health","/api/v1/info","/api/v1/auth/status","/api/v1/auth/setup","/api/v1/auth/login","/api/v1/mcp/oauth/callback"}
@@ -55,6 +68,18 @@ async def authentication_middleware(request:Request,call_next):
     if not account:
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail":"Authentication required."},status_code=401)
+    if request.method in {"POST","PUT","PATCH","DELETE"}:
+        origin=request.headers.get("origin")
+        allowed={o.rstrip("/") for o in origins}
+        if origin and origin.rstrip("/") not in allowed:
+            return JSONResponse({"detail":"Cross-origin state-changing request blocked."},status_code=403)
+        if not origin:
+            referer=request.headers.get("referer")
+            if referer:
+                ref=urlparse(referer)
+                ref_origin=f"{ref.scheme}://{ref.netloc}"
+                if ref_origin.rstrip("/") not in allowed:
+                    return JSONResponse({"detail":"Cross-origin state-changing request blocked."},status_code=403)
     request.state.account=account
     return await call_next(request)
 
@@ -126,8 +151,12 @@ def auth_setup(request:AccountSetupRequest,raw_request:Request):
 
 @app.post("/api/v1/auth/login")
 def auth_login_route(request:AuthCredentials,raw_request:Request):
+    key=f"login:{_client_key(raw_request)}:{request.email.strip().lower()}"
+    if login_rate_limited(key):
+        raise HTTPException(status_code=429,detail="Too many login attempts. Try again later.")
     result=auth_login(request.email,request.password)
     if not result: raise HTTPException(status_code=401,detail="Invalid email or password.")
+    clear_login_rate_limit(key)
     token,account=result
     from fastapi.responses import JSONResponse
     out=JSONResponse({"authenticated":True,"account":account})
@@ -231,7 +260,8 @@ async def mcp_oauth_callback(code:str|None=None,state:str|None=None,iss:str|None
         from mcp_oauth import complete_oauth
         await complete_oauth(flow_id or "",code,state,iss)
         return HTMLResponse("<h2>MCP connected</h2><p>You can return to Personal AI Assistant.</p><script>window.close()</script>")
-    except Exception as exc:return HTMLResponse(f"<h2>MCP authorization failed</h2><p>{str(exc)[:500]}</p>",status_code=400)
+    except Exception:
+        return HTMLResponse("<h2>MCP authorization failed</h2><p>OAuth callback could not be completed.</p>",status_code=400)
 @app.get("/api/v1/mcp/connectors/{connector_id}/oauth/status")
 def get_mcp_oauth_status(connector_id:int):
     from mcp_oauth import oauth_status
