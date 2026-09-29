@@ -74,7 +74,6 @@ async def authentication_middleware(request:Request,call_next):
         return await call_next(request)
     account=get_account_for_session(request.cookies.get(SESSION_COOKIE))
     if not account:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"detail":"Authentication required."},status_code=401)
     if request.method in {"POST","PUT","PATCH","DELETE"}:
         origin=request.headers.get("origin")
