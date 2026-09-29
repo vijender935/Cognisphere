@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel,Field
 from agent import MODEL,VISION_MODEL,run_agent,stream_agent
+from orchestration import plan_task
 from config import ALLOW_SHELL,FILE_ROOT,ensure_directories
 from db import connect
 from tools import init_db,recall_memories,remember_fact,load_history,list_sessions,set_chat_title,get_chat_title,delete_chat,remove_last_assistant,remove_last_turn,save_turn
@@ -319,6 +320,49 @@ def _public_job(job):
         "completed_at": job["completed_at"],
         "updated_at": job["updated_at"],
     }
+
+
+@app.post("/api/v1/chat/dispatch")
+def dispatch_chat(request:ChatRequest,raw_request:Request):
+    """Route simple conversational turns synchronously and tool-bearing work to the durable job queue."""
+    _check_chat_rate_limit("chat-dispatch:"+_client_key(raw_request))
+    if not os.getenv("GROQ_API_KEY"):
+        raise HTTPException(status_code=503,detail="GROQ_API_KEY is not configured.")
+
+    # Attachments may require document/image processing and therefore stay on the job path.
+    plan=plan_task(request.message)
+    if request.attachment_paths or plan.complexity != "simple":
+        job=create_job(
+            "chat",
+            {
+                "message":request.message,
+                "session_id":request.session_id,
+                "attachment_paths":request.attachment_paths,
+                "memory":request.memory,
+                "web_search":request.web_search,
+            },
+        )
+        try:
+            enqueue_chat_job(job["id"])
+        except Exception as exc:
+            mark_failed(job["id"],str(exc))
+            raise HTTPException(status_code=503,detail="Could not start background job.") from exc
+        return {"mode":"job","job":_public_job(get_job(job["id"]))}
+
+    try:
+        answer=run_agent(
+            request.message,
+            session_id=request.session_id,
+            memory_enabled=request.memory,
+            web_search_enabled=request.web_search,
+            verbose=False,
+        )
+    except Exception as exc:
+        logger.exception("Agent execution failed")
+        raise HTTPException(status_code=500,detail="Agent execution failed.") from exc
+    if answer.startswith("❌"):
+        raise HTTPException(status_code=502,detail=answer)
+    return {"mode":"sync","answer":answer,"session_id":request.session_id,"model":MODEL}
 
 
 @app.post("/api/v1/chat/jobs",status_code=202)
