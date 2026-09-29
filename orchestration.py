@@ -239,6 +239,8 @@ def select_relevant_tools(
     return [item[2] for item in scored if item[0] > 0][:max_tools]
 
 
+# Recovery routing patch: discovery-first after failed remote tool calls.
+
 def select_mcp_tools(
     schemas: list[dict],
     goal: str,
