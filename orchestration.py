@@ -62,8 +62,8 @@ _MEMORY_TERMS = {
 # parameter keys (owner, repo, path...) exist on almost every GitHub MCP
 # tool, so plain keyword-overlap scoring alone cannot tell a read request
 # ("repo inspect karo") apart from a write request ("branch banao"). These
-# sets let the selector penalize mutation tools when the goal only signals
-# read intent, instead of relying on alphabetical tie-breaking.
+# sets let the selector nudge mutation tools below read tools when the goal
+# only signals read intent, instead of relying on alphabetical tie-breaking.
 _READ_INTENT_TERMS = {
     "inspect", "analyse", "analyze", "check", "review", "explain",
     "batao", "dikhao", "dekho", "samjhao", "padho", "list", "show",
@@ -74,6 +74,13 @@ _MUTATION_TOOL_TERMS = {
     "branch", "merge", "close", "approve", "assign", "comment",
     "label", "release", "tag", "fork", "trash", "copy",
 }
+# Small, deliberately modest penalty: enough to break ties so a mutation
+# tool sorts below an equally/more relevant read tool (fixing the
+# create_branch-beats-get_file_contents bug), without being large enough to
+# zero out a mutation tool that has real keyword relevance of its own (e.g.
+# "check repository issues" should still surface both a list and a create
+# issue tool if both genuinely match).
+_MUTATION_PENALTY = 2
 
 
 def _contains(text: str, terms: set[str]) -> bool:
@@ -259,7 +266,7 @@ def select_relevant_tools(
                     break
 
         if suppress_mutations and (name_terms & _MUTATION_TOOL_TERMS):
-            score -= 5
+            score -= _MUTATION_PENALTY
 
         scored.append((score, display_name.lower(), schema))
 
