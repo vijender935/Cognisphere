@@ -458,3 +458,294 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
         state.round_number += 1
         response = None
         messages = _compact_runtime_messages(messages)
+        for retry in range(MAX_RETRIES + 1):
+            try:
+                request_kwargs = {
+                    "model": VISION_MODEL if image_urls else MODEL,
+                    "messages": messages,
+                    "temperature": 0.4,
+                    "max_completion_tokens": _completion_budget(bool(tool_schemas)),
+                }
+                if tool_schemas:
+                    request_kwargs.update({
+                        "tools": tool_schemas,
+                        "tool_choice": _tool_choice_for_turn(tool_schemas, task_plan, state),
+                    })
+                response = client.chat.completions.create(**request_kwargs)
+                break
+            except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    logger.warning("Groq rate limit hit; avoiding rapid retry burst.")
+                    if retry < MAX_RETRIES:
+                        time.sleep(8)
+                        continue
+                    return "⚠️ Groq rate limit hit. Tool execution ko unnecessary retry burst se bachane ke liye rok diya gaya; thodi der baad task retry karo."
+                if _is_context_length_error(exc):
+                    messages = _compact_runtime_messages(messages)
+                    logger.warning("Groq context limit hit; compacted messages (round=%s, chars=%s)",
+                                   state.round_number,
+                                   sum(len(str(m.get("content", ""))) for m in messages))
+                    if retry < MAX_RETRIES:
+                        continue
+                logger.warning("Model request failed (retry %s/%s, tools=%s): %s",
+                               retry, MAX_RETRIES,
+                               [s.get("function", {}).get("name") for s in tool_schemas], exc)
+                if retry < MAX_RETRIES:
+                    time.sleep(2 ** retry)
+        if response is None:
+            return "❌ Model/API request failed after retries. Context/tool request could not be accepted; server logs me exact error recorded hai."
+
+        msg = response.choices[0].message
+        messages.append(msg.model_dump(exclude_none=True))
+        if not msg.tool_calls:
+            answer = msg.content or ""
+            save_turn(session_id, goal, answer)
+            return answer
+
+        for call in msg.tool_calls:
+            name = call.function.name
+            state.tool_calls += 1
+            state.last_tool = name
+            try:
+                args = json.loads(call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            if verbose:
+                logger.info("Tool call: %s(%s)", name, args)
+
+            call_signature = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
+            if call_signature in failed_call_signatures:
+                result = (
+                    f"Tool error in {name}: the identical tool call already failed. "
+                    "Do not repeat it; use a search/discovery tool or change the arguments."
+                )
+            elif call_signature in successful_call_results:
+                # Same tool + same arguments already succeeded earlier this turn.
+                # Reuse the cached result instead of hitting the remote MCP server
+                # again, and tell the model plainly so it stops re-fetching the
+                # identical data instead of moving the task forward.
+                result = (
+                    f"Tool '{name}' was already called with these exact arguments "
+                    "earlier in this task; reuse that result instead of calling it "
+                    "again:\n" + successful_call_results[call_signature]
+                )
+            else:
+                result = _execute_tool(name, args)
+            validated = validate_tool_result(result)
+            logger.info(
+                "Tool result: %s | ok=%s | %s",
+                name, validated.ok, validated.content[:1200],
+            )
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "name": name,
+                "content": validated.content,
+            })
+            if validated.ok:
+                state.consecutive_failures = 0
+                successful_call_results.setdefault(call_signature, validated.content)
+            else:
+                state.consecutive_failures += 1
+                failed_call_signatures.add(call_signature)
+                tool_schemas = _expand_tools_after_failure(
+                    goal, tool_schemas, validated.content
+                )
+                messages.append({
+                    "role": "system",
+                    "content": recovery_instruction(name, validated),
+                })
+
+    if state.consecutive_failures >= 2:
+        return "⚠️ Tool execution repeatedly failed. Maine unsafe/infinite retry se bachne ke liye execution stop kar diya."
+    return f"⚠️ Max tool iterations ({tool_round_limit}) reached — task incomplete reh gaya."
+
+def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, memory_enabled=True, web_search_enabled=True):
+    """Execute tools first when required, then stream the final assistant response."""
+    goal = goal.strip()
+    if not goal:
+        yield "Please enter a message."
+        return
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        yield "❌ GROQ_API_KEY set nahi hai."
+        return
+
+    _prepare_goal(goal)
+    task_plan = plan_task(goal)
+    execution_plan = build_execution_plan(task_plan)
+    client = Groq(api_key=api_key)
+    tool_schemas = _prepare_tool_schemas(
+        _tool_schemas_for(goal, web_search_enabled=web_search_enabled)
+    )
+    messages = build_messages(
+        goal,
+        session_id,
+        rag_sources=rag_sources,
+        memory_enabled=memory_enabled,
+        tool_budget=bool(tool_schemas),
+    )
+    tool_round_limit = min(
+        MAX_ITERATIONS,
+        max(execution_plan.max_tool_rounds, 4 if tool_schemas else 1),
+    )
+
+    if image_urls:
+        messages[-1]["content"] = [{"type": "text", "text": goal}] + [
+            {"type": "image_url", "image_url": {"url": url}} for url in image_urls
+        ]
+
+    state = ExecutionState()
+    failed_call_signatures = set()
+    successful_call_results = {}
+    while should_continue_execution(state, tool_round_limit):
+        state.round_number += 1
+        response = None
+        messages = _compact_runtime_messages(messages)
+
+        for retry in range(MAX_RETRIES + 1):
+            try:
+                request_kwargs = {
+                    "model": VISION_MODEL if image_urls else MODEL,
+                    "messages": messages,
+                    "temperature": 0.4,
+                    "max_completion_tokens": _completion_budget(bool(tool_schemas)),
+                }
+                if tool_schemas:
+                    request_kwargs.update({
+                        "tools": tool_schemas,
+                        "tool_choice": _tool_choice_for_turn(tool_schemas, task_plan, state),
+                    })
+                response = client.chat.completions.create(**request_kwargs)
+                break
+            except Exception as exc:
+                if _is_rate_limit_error(exc):
+                    logger.warning("Groq rate limit hit; avoiding rapid retry burst.")
+                    if retry < MAX_RETRIES:
+                        time.sleep(8)
+                        continue
+                    return "⚠️ Groq rate limit hit. Tool execution ko unnecessary retry burst se bachane ke liye rok diya gaya; thodi der baad task retry karo."
+                if _is_context_length_error(exc):
+                    messages = _compact_runtime_messages(messages)
+                    logger.warning("Groq context limit hit during streaming; compacted messages (round=%s, chars=%s)",
+                                   state.round_number,
+                                   sum(len(str(m.get("content", ""))) for m in messages))
+                    if retry < MAX_RETRIES:
+                        continue
+                logger.warning("Streaming preparation request failed (retry %s/%s, tools=%s): %s",
+                               retry, MAX_RETRIES,
+                               [s.get("function", {}).get("name") for s in tool_schemas], exc)
+                if retry < MAX_RETRIES:
+                    time.sleep(2 ** retry)
+
+        if response is None:
+            yield "❌ Model/API request failed after retries. Context/tool request could not be accepted; server logs me exact error recorded hai."
+            return
+
+        msg = response.choices[0].message
+        messages.append(msg.model_dump(exclude_none=True))
+
+        if not msg.tool_calls:
+            answer = msg.content or ""
+            if answer:
+                words = answer.split(" ")
+                for i, word in enumerate(words):
+                    yield word + (" " if i < len(words) - 1 else "")
+            save_turn(session_id, goal, answer)
+            return
+
+        for call in msg.tool_calls:
+            name = call.function.name
+            state.tool_calls += 1
+            state.last_tool = name
+            yield "🔧 Calling tool: " + name + "...\n\n"
+
+            try:
+                args = json.loads(call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+
+            call_signature = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
+            if call_signature in failed_call_signatures:
+                result = (
+                    f"Tool error in {name}: the identical tool call already failed. "
+                    "Do not repeat it; use a search/discovery tool or change the arguments."
+                )
+            elif call_signature in successful_call_results:
+                # Same tool + same arguments already succeeded earlier this turn.
+                # Reuse the cached result instead of hitting the remote MCP server
+                # again, and tell the model plainly so it stops re-fetching the
+                # identical data instead of moving the task forward.
+                result = (
+                    f"Tool '{name}' was already called with these exact arguments "
+                    "earlier in this task; reuse that result instead of calling it "
+                    "again:\n" + successful_call_results[call_signature]
+                )
+            else:
+                result = _execute_tool(name, args)
+            validated = validate_tool_result(result)
+            logger.info(
+                "Tool result: %s | ok=%s | %s",
+                name, validated.ok, validated.content[:1200],
+            )
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "name": name,
+                "content": validated.content,
+            })
+
+            if validated.ok:
+                state.consecutive_failures = 0
+                successful_call_results.setdefault(call_signature, validated.content)
+            else:
+                state.consecutive_failures += 1
+                failed_call_signatures.add(call_signature)
+                tool_schemas = _expand_tools_after_failure(
+                    goal, tool_schemas, validated.content
+                )
+                messages.append({
+                    "role": "system",
+                    "content": recovery_instruction(name, validated),
+                })
+
+        if state.consecutive_failures >= 2:
+            yield "⚠️ Tool execution repeatedly failed."
+            return
+
+        if state.round_number >= tool_round_limit:
+            yield f"⚠️ Max tool iterations ({tool_round_limit}) reached — task incomplete reh gaya."
+            return
+
+def interactive():
+    session_id = os.getenv("AGENT_SESSION", "default")
+    print(f"Personal AI Agent — model: {MODEL}")
+    print("Commands: /new, /remember <fact>, /memories, /exit\n")
+    while True:
+        try:
+            goal = input("Tum: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not goal:
+            continue
+        command = goal.lower()
+        if command in {"/exit", "/quit", "exit", "quit"}:
+            break
+        if command == "/new":
+            session_id = f"session-{time.time_ns()}"
+            print(f"🆕 New session: {session_id}\n")
+            continue
+        if command == "/memories":
+            print("\n".join(f"- {m}" for m in semantic_recall_memories("", limit=50)) or "(no memories)")
+            print()
+            continue
+        if command.startswith("/remember "):
+            remember_fact(goal[len("/remember "):].strip(), source="user-command")
+            print("🧠 Memory saved.\n")
+            continue
+        print("\nAgent:", run_agent(goal, session_id=session_id), "\n")
+
+if __name__ == "__main__":
+    init_db()
+    print(run_agent(" ".join(sys.argv[1:]))) if len(sys.argv) > 1 else interactive()
