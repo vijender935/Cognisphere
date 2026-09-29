@@ -456,6 +456,10 @@ def run_agent(goal, session_id="default", image_urls=None, rag_sources=None, ver
             else:
                 result = _execute_tool(name, args)
             validated = validate_tool_result(result)
+            logger.info(
+                "Tool result: %s | ok=%s | %s",
+                name, validated.ok, validated.content[:1200],
+            )
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.id,
@@ -586,6 +590,10 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
             else:
                 result = _execute_tool(name, args)
             validated = validate_tool_result(result)
+            logger.info(
+                "Tool result: %s | ok=%s | %s",
+                name, validated.ok, validated.content[:1200],
+            )
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.id,
