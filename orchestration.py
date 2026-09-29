@@ -132,7 +132,7 @@ def _tokenize(text: str) -> set[str]:
     """Normalize arbitrary tool metadata and user text into comparable terms."""
     import re
 
-    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\\1 \\2", str(text or ""))
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(text or ""))
     return {
         token
         for token in re.findall(r"[a-z0-9]+", expanded.lower())
@@ -143,22 +143,32 @@ def _tokenize(text: str) -> set[str]:
 def _tool_metadata(schema: dict) -> tuple[str, str, str]:
     fn = schema.get("function", {}) if isinstance(schema, dict) else {}
     name = str(fn.get("name", ""))
-    # Do not let the generated MCP server prefix dominate routing decisions.
-    tool_name = name.removeprefix("mcp__")
-    if "__" in tool_name:
-        _, tool_name = tool_name.split("__", 1)
+
+    # Preserve BOTH the MCP server identity and the underlying tool name.
+    # Example:
+    #   mcp__GitHub__create_issue
+    # must match a request containing "GitHub" as well as "issue".
+    qualified = name.removeprefix("mcp__")
+    if "__" in qualified:
+        server_name, tool_name = qualified.split("__", 1)
+    else:
+        server_name, tool_name = "", qualified
 
     description = str(fn.get("description", ""))
     parameters = fn.get("parameters") or {}
     properties = parameters.get("properties") if isinstance(parameters, dict) else {}
-    metadata_parts = [tool_name, description]
+
+    metadata_parts = [server_name, tool_name, description]
     if isinstance(properties, dict):
         for key, value in properties.items():
             metadata_parts.append(str(key))
             if isinstance(value, dict):
                 metadata_parts.append(str(value.get("title", "")))
                 metadata_parts.append(str(value.get("description", "")))
-                metadata_parts.extend(str(item) for item in (value.get("enum") or []) if item is not None)
+                metadata_parts.extend(
+                    str(item) for item in (value.get("enum") or []) if item is not None
+                )
+
     return tool_name, " ".join(metadata_parts), name
 
 
@@ -169,9 +179,9 @@ def select_relevant_tools(
 ) -> list[dict]:
     """Select tools from their advertised metadata without server-specific rules.
 
-    Relevance is derived only from the current user request and each tool's
-    name, description, and input metadata. A zero-score catalog is not exposed
-    to the model: unrelated tools must not be offered merely because they exist.
+    Relevance is derived from the current request and each tool's complete
+    advertised identity, including MCP server name, tool name, description,
+    and input metadata.
     """
     if max_tools < 1:
         return []
@@ -185,25 +195,20 @@ def select_relevant_tools(
         tool_name, metadata, display_name = _tool_metadata(schema)
         metadata_terms = _tokenize(metadata)
         name_terms = _tokenize(tool_name)
-        description_terms = _tokenize(metadata) - name_terms
+        description_terms = metadata_terms - name_terms
 
         exact_name = goal_terms & name_terms
         exact_description = goal_terms & description_terms
         exact_metadata = goal_terms & metadata_terms
 
-        # Name and description carry more weight than generic parameter names.
         score = (len(exact_name) * 8) + (len(exact_description) * 4)
         score += len(exact_metadata - exact_name - exact_description) * 2
 
-        # Phrase overlap helps with natural-language requests such as
-        # "process images from drive" without maintaining a synonym dictionary.
         goal_text = " ".join(sorted(goal_terms))
         metadata_text = " ".join(sorted(metadata_terms))
-        if goal_text and goal_text in metadata.lower():
+        if goal_text and goal_text in metadata_text:
             score += 6
 
-        # Lightweight morphological/fuzzy matching handles variants such as
-        # process/processing and image/images without hardcoded aliases.
         for term in goal_terms:
             if len(term) < 5:
                 continue
@@ -228,6 +233,7 @@ def select_mcp_tools(
     """Backward-compatible MCP selector using dynamic tool metadata routing."""
     return select_relevant_tools(schemas, goal, max_tools=max_tools)
 
+
 def build_execution_plan(plan: TaskPlan) -> ExecutionPlan:
     steps = ["understand_request"]
     if plan.needs_memory:
@@ -242,9 +248,6 @@ def build_execution_plan(plan: TaskPlan) -> ExecutionPlan:
         steps.append("mcp_tool_execution")
     steps.extend(["validate_tool_results", "compose_answer"])
 
-    # Keep a bounded safety cap, but allow enough rounds for MCP workflows
-    # that may require discovery -> lookup -> validation -> final retrieval.
-    # The agent-level MAX_ITERATIONS remains the hard global ceiling.
     max_tool_rounds = (
         8 if plan.complexity == "complex"
         else 4 if plan.complexity == "tool"
