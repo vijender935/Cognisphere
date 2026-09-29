@@ -267,7 +267,7 @@ def _compact_runtime_messages(messages):
     """Bound live agent context after tool results are appended."""
     limit = _runtime_context_limit()
     try:
-        tool_limit = max(1000, int(os.getenv("MAX_TOOL_RESULT_CHARS", "3500")))
+        tool_limit = max(1000, int(os.getenv("MAX_TOOL_RESULT_CHARS", "1800")))
     except ValueError:
         tool_limit = 3500
     normalized = []
