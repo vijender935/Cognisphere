@@ -233,7 +233,7 @@ def add_mcp_connector(request:MCPConnectorRequest):
         from mcp_client import discover_connector_diagnostics
         status=discover_connector_diagnostics(connector["name"])
     except Exception as exc:
-        status={"connected":False,"tools":0,"tool_names":[],"error":str(exc)[:500]}
+        status={"connected":False,"tools":0,"tool_names":[],"error":"MCP connection failed."}
 
     connector=update_connector_status(connector["id"],status) or connector
     connector["headers"]={k:"***" for k in connector.get("headers",{})}
@@ -258,7 +258,7 @@ async def start_mcp_oauth(connector_id:int):
     try:
         from mcp_oauth import begin_oauth,oauth_redirect_uri
         return await begin_oauth(connector_id,oauth_redirect_uri())
-    except Exception as exc: raise HTTPException(status_code=502,detail=str(exc)[:500]) from exc
+    except Exception as exc: raise HTTPException(status_code=502,detail="MCP OAuth could not be started.") from exc
 @app.get("/api/v1/mcp/oauth/callback")
 async def mcp_oauth_callback(code:str|None=None,state:str|None=None,iss:str|None=None,flow_id:str|None=None,error:str|None=None):
     if error:return HTMLResponse(f"<h2>MCP authorization failed</h2><p>{error[:300]}</p>",status_code=400)
@@ -450,7 +450,7 @@ def create_memory(request:MemoryRequest):
     try:
         remember_fact(request.fact,source=request.source); remember_semantic(request.fact,source=request.source)
         return {"saved":True,"fact":request.fact.strip()}
-    except Exception as exc:raise HTTPException(status_code=500,detail=str(exc)) from exc
+    except Exception as exc:raise HTTPException(status_code=500,detail="Operation failed.") from exc
 @app.delete("/api/v1/memories")
 def delete_memory(fact:str):
     exact=fact.strip()
