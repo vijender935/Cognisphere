@@ -486,7 +486,6 @@ def stream_agent(goal, session_id="default", image_urls=None, rag_sources=None, 
                     "messages": messages,
                     "temperature": 0.4,
                     "max_completion_tokens": _completion_budget(bool(tool_schemas)),
-                    "truncation": "auto",
                 }
                 if tool_schemas:
                     request_kwargs.update({
