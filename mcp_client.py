@@ -499,6 +499,13 @@ async def _call_group_tool(name, arguments):
                 terminate_on_close=True,
             )
             async with Client(transport) as client:
+                # MCP 2026-07-28 clients mirror x-mcp-header annotated
+                # arguments (e.g. GitHub's owner/repo) into Mcp-Param-*
+                # headers only after the tool has been listed. Do not skip
+                # this list_tools() call even though we already have a cached
+                # model-facing schema; the SDK needs the live tool definition
+                # to build the protocol headers.
+                await client.list_tools()
                 result = await client.call_tool(
                     original_tool_name,
                     arguments or {},
@@ -512,6 +519,9 @@ async def _call_group_tool(name, arguments):
             sse_read_timeout=max(timeout, 300.0),
         )
         async with Client(transport) as client:
+            # Keep the live tool definition in the SDK client so it can emit
+            # required Mcp-Param-* headers for x-mcp-header arguments.
+            await client.list_tools()
             result = await client.call_tool(
                 original_tool_name,
                 arguments or {},
