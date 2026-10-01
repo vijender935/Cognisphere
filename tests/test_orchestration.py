@@ -1,4 +1,4 @@
-from orchestration import plan_prompt,plan_task
+from orchestration import plan_task
 def test_simple_conversation_plan():assert plan_task("Hello, how are you?").complexity=="simple"
 def test_current_information_plan():assert plan_task("What is the latest news today?").needs_web
 def test_document_plan():assert plan_task("Meri uploaded PDF file me kya likha hai?").needs_rag
