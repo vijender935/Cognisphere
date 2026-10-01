@@ -309,25 +309,3 @@ def build_execution_plan(plan: TaskPlan) -> ExecutionPlan:
     return ExecutionPlan(steps=tuple(steps), max_tool_rounds=max_tool_rounds)
 
 
-def plan_prompt(plan: TaskPlan) -> str:
-    execution = build_execution_plan(plan)
-    routes = []
-    if plan.needs_memory:
-        routes.append("use relevant saved memory when it helps")
-    if plan.needs_rag:
-        routes.append("use relevant knowledge-base/document context")
-    if plan.needs_web:
-        routes.append("use web_search for current or online information")
-    if plan.needs_local_tools:
-        routes.append("use an appropriate local tool when required")
-    if plan.needs_mcp:
-        routes.append("use an explicitly configured MCP tool when required")
-
-    route_text = "; ".join(routes) if routes else "answer conversationally without unnecessary tools"
-    return (
-        f"Task plan: intent={plan.intent}, complexity={plan.complexity}. "
-        f"Execution stages: {', '.join(execution.steps)}. "
-        f"Max tool rounds: {execution.max_tool_rounds}. "
-        f"Routing guidance: {route_text}. "
-        "Treat these as hints, not facts; inspect the user's actual request before acting."
-    )
