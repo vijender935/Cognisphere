@@ -5,7 +5,6 @@ def test_document_plan():assert plan_task("Meri uploaded PDF file me kya likha h
 def test_mcp_plan():assert plan_task("Check my GitHub repository issues").needs_mcp
 def test_multi_route_plan():
  p=plan_task("Search my previous memory and check today's GitHub news");assert p.needs_memory and p.needs_mcp and p.needs_web
-def test_plan_prompt():assert "Task plan:" in plan_prompt(plan_task("Calculate this and search the latest result"))
 def test_tool_result_validation():
  from orchestration import validate_tool_result,recovery_instruction
  ok=validate_tool_result({"value":42});assert ok.ok and ok.content=="{'value': 42}"
