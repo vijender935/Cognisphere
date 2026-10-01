@@ -4,7 +4,7 @@ import json
 from config import ensure_directories
 from db import connect
 
-DEFAULTS={"appearance":"System","haptics":True,"language":"English","web_search":True,"memory":True,"custom_instructions":"","response_style":"Natural"}
+DEFAULTS={"appearance":"System","haptics":True,"language":"English","web_search":True,"memory":True}
 
 def init_preferences_db():
     ensure_directories()
@@ -22,9 +22,7 @@ def _clean(data):
             if key in data: result[key]=data[key]
     result["appearance"]=result["appearance"] if result["appearance"] in {"System","Light","Dark"} else "System"
     result["language"]=result["language"] if result["language"] in {"English","Hindi"} else "English"
-    result["response_style"]=result["response_style"] if result["response_style"] in {"Natural","Concise","Detailed"} else "Natural"
     result["haptics"]=bool(result["haptics"]); result["web_search"]=bool(result["web_search"]); result["memory"]=bool(result["memory"])
-    result["custom_instructions"]=str(result["custom_instructions"] or "")[:4000]
     return result
 
 def get_preferences():
