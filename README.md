@@ -22,7 +22,6 @@ This repository is intentionally designed for one personal instance, not as a mu
 - Semantic memory retrieval with FastEmbed.
 - Keyword fallback retrieval.
 - Save, list, search, and delete memories.
-- Custom instructions and response-style preferences.
 - Document chunking and semantic retrieval.
 - Source-scoped RAG for attachments.
 - PDF, DOCX, TXT, Markdown, CSV, JSON, XML and common image parsing.
@@ -63,8 +62,6 @@ This repository is intentionally designed for one personal instance, not as a mu
 - System / Light / Dark appearance.
 - Language and haptics preferences.
 - Web-search and memory toggles.
-- Custom instructions.
-- Natural / Concise / Detailed response style.
 - Persistent update and reset logic.
 
 ### Frontend
