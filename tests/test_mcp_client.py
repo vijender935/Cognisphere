@@ -112,3 +112,11 @@ def test_stdio_mcp_client_roundtrip(monkeypatch):
     monkeypatch.setattr(mcp_client, "load_server_configs", lambda: [cfg])
     res = mcp_client.call_tool("mcp__local_stdio__calculate", {"expression": "25 * 4"})
     assert "100" in res
+
+
+def test_component_name_alias_keeps_tools_for_connector_names_with_spaces():
+    from types import SimpleNamespace
+    config = SimpleNamespace(name="Search Image")
+    indexed = mcp_client._configs_by_component_name([config])
+    assert indexed["Search Image"] is config
+    assert indexed["Search_Image"] is config

@@ -264,6 +264,15 @@ def _configs_by_component_name(configs):
     return indexed
 
 
+def _configs_by_component_name(configs):
+    """Index configs by both persisted and component-safe server names."""
+    indexed = {}
+    for config in configs:
+        indexed[config.name] = config
+        indexed[_safe_tool_component(config.name)] = config
+    return indexed
+
+
 def _schemas_from_group(group, configs_by_name):
     schemas = []
     for qualified_name, tool in group.tools.items():
